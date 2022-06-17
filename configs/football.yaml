@@ -1,0 +1,33 @@
+base:
+  n_rollout_threads: 2
+  episode_length: 200
+  total_num_steps: 2.5e+6
+
+policy:
+  type: actor-critic
+  args:
+    hidden_dim: 64
+    num_dense_layers: 2
+    num_rnn_layers: 1
+
+environment:
+  type: football
+  args:
+    base:
+      env_name: academy_3_vs_1_with_keeper
+      share_reward: True
+    train:
+      rewards: scoring,checkpoints
+    eval:
+      rewards: scoring
+    render:
+      rewards: scoring
+      wirte_full_episode_dumps: True
+      write_video: True
+      logdir: /mnt/c/Users/fuwth/Documents/icml22_demos/ca_hard/ar'
+      other_config_options:
+        video_format: avi
+        render_resolution_x: 960
+        render_resolution_y: 540
+        video_quality_level: 2
+        display_game_stats: False
