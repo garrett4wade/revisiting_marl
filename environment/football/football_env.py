@@ -80,8 +80,6 @@ class FootballEnvironment:
         self.__step_count[:] = self.__episode_return[:] = 0
         obs, _ = self.__post_process_obs_and_rew(obs,
                                                  np.zeros(self.num_agents))
-        available_actions = np.ones(
-            (obs.shape[0], self.__env.action_space[0].n), dtype=np.uint8)
         return BasicObservation(obs)
 
     def __post_process_obs_and_rew(self, obs, reward):
@@ -117,7 +115,7 @@ class FootballEnvironment:
         return (
             BasicObservation(obs),
             np.array(reward[:, None], dtype=np.float32),
-            np.array([done for _ in range(self.num_agents)], dtype=np.uint8),
+            np.array([[done] for _ in range(self.num_agents)], dtype=np.uint8),
             [copy.deepcopy(info) for _ in range(self.num_agents)],
         )
 

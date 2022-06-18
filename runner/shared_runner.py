@@ -112,6 +112,8 @@ class SharedRunner:
                     (obs, rewards,
                      dones) = map(lambda x: recursive_apply(x, to_tensor),
                                   (obs, rewards, dones))
+                    assert rewards.shape == (self.n_rollout_threads, self.num_agents, 1), rewards.shape
+                    assert dones.shape == (self.n_rollout_threads, self.num_agents, 1), dones.shape
 
                     for (done, info) in zip(dones, infos):
                         if done.all():
@@ -120,7 +122,6 @@ class SharedRunner:
                             train_ep_length += info[0]['episode']['l']
 
                 with timing.add_time("buffer"):
-                    dones = dones.unsqueeze(-1)
                     dones_env = dones.all(1, keepdim=True).float()
                     masks = 1 - dones_env
 
@@ -151,6 +152,8 @@ class SharedRunner:
 
             # compute return and update network
             with timing.add_time("gae"):
+                rollout_result = self.collect(self.episode_length)
+                self.buffer.storage.value_preds[self.episode_length] = rollout_result.value
                 self.buffer.compute_returns(
                     value_normalizer=self.policy.popart_head)
             with timing.add_time("train"):

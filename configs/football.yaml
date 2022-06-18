@@ -1,7 +1,8 @@
 base:
-  n_rollout_threads: 2
+  n_rollout_threads: 50
   episode_length: 200
   total_num_steps: 2.5e+6
+  use_wandb: True
 
 policy:
   type: actor-critic

@@ -111,10 +111,11 @@ class SharedReplayBuffer(object):
         self.storage.bad_masks[self.step + 1] = sample.bad_masks
         self.storage.active_masks[self.step + 1] = sample.active_masks
 
-        self.step = (self.step + 1) % self.episode_length
+        self.step += 1
 
     def after_update(self):
         self.storage[0] = self.storage[-1]
+        assert self.step == self.episode_length, self.step
         self.step = 0
 
     def compute_returns(self, value_normalizer=None):
