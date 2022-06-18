@@ -45,12 +45,6 @@ class RunningMeanStd(nn.Module):
 
         batch_mean = x.mean(dim=norm_dims)
         batch_sq_mean = x.square().mean(dim=norm_dims)
-        if dist.is_initialized():
-            world_size = dist.get_world_size()
-            dist.all_reduce(batch_mean)
-            dist.all_reduce(batch_sq_mean)
-            batch_mean /= world_size
-            batch_sq_mean /= world_size
 
         self.__mean.mul_(self.__beta).add_(batch_mean * (1.0 - self.__beta))
         self.__mean_sq.mul_(self.__beta).add_(batch_sq_mean *

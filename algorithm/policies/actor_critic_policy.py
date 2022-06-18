@@ -7,8 +7,8 @@ import torch.nn as nn
 
 from algorithm import modules
 from algorithm.policy import register, RolloutRequest, RolloutResult
+from algorithm.trainer import SampleBatch
 from utils.namedarray import namedarray, recursive_apply
-from utils.shared_buffer import SampleBatch
 
 
 @namedarray
@@ -97,12 +97,14 @@ class Actor(nn.Module):
                 f"Action space {action_space} not implemented.")
 
     def forward(self, obs, rnn_states, masks, available_actions=None):
-        actor_features, rnn_states = self.base(obs, rnn_states, masks)
+        x, rnn_states = self.base(obs, rnn_states, masks)
 
         if self.action_type == 'multidiscrete':
             actor_output = [action_out(x) for action_out in self.action_outs]
         elif self.action_type == 'discrete':
-            actor_output = self.action_out(x, available_actions)
+            actor_output = self.action_out(x)
+            if available_actions is not None:
+                actor_output[available_actions == 0] = -1e10
         elif self.action_type == 'continuous':
             action_mean = self.fc_mean(x)
             if self.std_type == 'fixed' or self.std_type == 'separate_learnable':
@@ -152,7 +154,7 @@ class Critic(nn.Module):
                                                 critic_dim, v_out_gain)
 
     def forward(self, cent_obs, rnn_states, masks):
-        critic_features, rnn_states = self.base(cent_obs)
+        critic_features, rnn_states = self.base(cent_obs, rnn_states)
         values = self.v_out(critic_features)
         return values, rnn_states
 
@@ -244,11 +246,7 @@ class ActorCriticPolicy:
 
     @property
     def popart_head(self):
-        if not self.__popart:
-            raise ValueError(
-                "Set popart=True in policy config to activate popart value head."
-            )
-        return self.net.critic_head
+        return self.critic.v_out if self.__popart else None
 
     def normalize_value(self, x):
         return self.popart_head.normalize(x)
@@ -336,7 +334,6 @@ class ActorCriticPolicy:
                     [dist.probs.argmax(dim=-1) for dist in action_dists],
                     dim=-1)
             else:
-
                 # dist.sample adds an additional dimension
                 actions = torch.stack(
                     [dist.sample().squeeze(0) for dist in action_dists],
@@ -361,7 +358,7 @@ class ActorCriticPolicy:
         policy_state = PolicyState(actor_hx.transpose(0, 1),
                                    critic_hx.transpose(0, 1))
         return RolloutResult(action=actions,
-                             log_probs=log_probs,
+                             log_prob=log_probs,
                              value=value,
                              policy_state=policy_state)
 

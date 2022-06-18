@@ -7,6 +7,8 @@ from multiprocessing import Process, Pipe
 from abc import ABC, abstractmethod
 from utils.util import tile_images
 
+from utils.namedarray import recursive_aggregate
+
 
 class CloudpickleWrapper(object):
     """
@@ -211,13 +213,14 @@ class SubprocVecEnv(ShareVecEnv):
         results = [remote.recv() for remote in self.remotes]
         self.waiting = False
         obs, rews, dones, infos = zip(*results)
-        return np.stack(obs), np.stack(rews), np.stack(dones), infos
+        return recursive_aggregate(
+            obs, np.stack), np.stack(rews), np.stack(dones), infos
 
     def reset(self):
         for remote in self.remotes:
             remote.send(('reset', None))
         obs = [remote.recv() for remote in self.remotes]
-        return np.stack(obs)
+        return recursive_aggregate(obs, np.stack)
 
     def reset_task(self):
         for remote in self.remotes:

@@ -12,7 +12,7 @@ import torch
 import yaml
 from configs.config import get_config
 from environment.env_wrappers import SubprocVecEnv
-from runners.shared_runner import SharedRunner
+from runner.shared_runner import SharedRunner
 
 import algorithm.policy
 import environment.env_base as env_base
@@ -127,15 +127,12 @@ def main(args):
     }
     # run experiments
     runner = SharedRunner(config, policy)
-    if not all_args.eval_only and not all_args.use_render:
+    if not all_args.use_render:
         runner.run()
     else:
         assert all_args.model_dir is not None
-        if all_args.eval_only:
-            runner.eval(0, render=False)
-        else:
-            assert all_args.n_render_rollout_threads == 1
-            runner.eval(0, render=True)
+        assert all_args.n_render_rollout_threads == 1
+        runner.eval(0, render=True)
 
     # post process
     envs.close()
@@ -145,10 +142,10 @@ def main(args):
     if all_args.use_wandb:
         run.finish()
     else:
-        if hasattr(runner, writter):
-            runner.writter.export_scalars_to_json(
+        if hasattr(runner, writer):
+            runner.writer.export_scalars_to_json(
                 str(runner.log_dir + '/summary.json'))
-            runner.writter.close()
+            runner.writer.close()
 
 
 if __name__ == "__main__":

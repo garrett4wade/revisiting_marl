@@ -1,4 +1,5 @@
 from typing import Union
+import gym
 import torch
 import numpy as np
 from collections import defaultdict
@@ -6,6 +7,7 @@ from dataclasses import dataclass
 from utils.namedarray import namedarray, recursive_apply
 from environment.env_base import Observation, Action
 from algorithm.policy import PolicyState
+from algorithm.trainer import SampleBatch
 
 
 @torch.no_grad()
@@ -25,31 +27,12 @@ def masked_normalization(x,
     factor = mask.sum(dim=dim, keepdim=True)
     x_sum = x.sum(dim=dim, keepdim=True)
     x_sum_sq = x.square().sum(dim=dim, keepdim=True)
-    if dist.is_initialized():
-        dist.all_reduce(factor, op=dist.ReduceOp.SUM)
-        dist.all_reduce(x_sum, op=dist.ReduceOp.SUM)
-        dist.all_reduce(x_sum_sq, op=dist.ReduceOp.SUM)
     mean = x_sum / factor
     meansq = x_sum_sq / factor
     var = meansq - mean**2
     if unbiased:
         var *= factor / (factor - 1)
     return (x - mean) / (var.sqrt() + eps)
-
-
-@namedarray
-class SampleBatch:
-    obs: Observation
-    value_preds: torch.Tensor
-    returns: torch.Tensor
-    actions: Union[Action, torch.Tensor]
-    action_log_probs: torch.Tensor
-    rewards: torch.Tensor
-    masks: torch.Tensor
-    active_masks: torch.Tensor
-    bad_masks: torch.Tensor
-    policy_state: PolicyState = None
-    advantages: torch.Tensor = None
 
 
 class SharedReplayBuffer(object):
@@ -81,11 +64,20 @@ class SharedReplayBuffer(object):
         self.num_agents = num_agents
         self.device = device
 
+        if isinstance(act_space, gym.spaces.Discrete):
+            act_dim = act_space.n
+        elif isinstance(act_space, gym.spaces.Box):
+            act_dim = act_space.shape[0]
+        elif isinstance(act_space, gym.spaces.MultiDiscrete):
+            act_dim = sum(act_space.nvec)
+        else:
+            raise NotImplementedError()
+
         self.storage = SampleBatch(
             obs=obs_space.sample(),
             value_preds=torch.zeros(1),
             returns=torch.zeros(1),
-            actions=act_space.sample(),
+            actions=torch.zeros(act_dim),
             action_log_probs=torch.zeros(1),
             rewards=torch.zeros(1),
             masks=torch.ones(1),
@@ -176,7 +168,7 @@ class SharedReplayBuffer(object):
         self,
         num_mini_batch,
     ):
-        batch_size = self.n_rollout_threads * self.episode_length
+        batch_size = self.n_rollout_threads * self.episode_length * self.num_agents
 
         assert batch_size >= num_mini_batch and batch_size % num_mini_batch == 0, (
             "PPO requires the number of processes ({}) "
@@ -192,7 +184,7 @@ class SharedReplayBuffer(object):
             for i in range(num_mini_batch)
         ]
         sample = self.storage[:-1]
-        sample = recursive_apply(sample, lambda x: x.flatten(end_dim=1))
+        sample = recursive_apply(sample, lambda x: x.flatten(end_dim=2))
         for indices in sampler:
             yield sample[indices]
 
@@ -204,14 +196,14 @@ class SharedReplayBuffer(object):
         episode_length, n_rollout_threads = self.episode_length, self.n_rollout_threads
         num_chunks = episode_length // data_chunk_length
         assert data_chunk_length <= episode_length and episode_length % data_chunk_length == 0
-        assert num_chunks >= num_mini_batch and num_chunks % num_mini_batch == 0
-        data_chunks = n_rollout_threads * episode_length // data_chunk_length  # [C=r*T/L]
+        data_chunks = n_rollout_threads * num_chunks * self.num_agents  # [C=r*T/L]
+        assert data_chunks >= num_mini_batch and data_chunks % num_mini_batch == 0
         mini_batch_size = data_chunks // num_mini_batch
 
         def _cast(x):
             x = x.reshape(num_chunks, x.shape[0] // num_chunks, *x.shape[1:])
             x = x.transpose(1, 0)
-            return x.flatten(start_dim=1, end_dim=2)
+            return x.flatten(start_dim=1, end_dim=3)
 
         rand = torch.randperm(data_chunks)
         sampler = [
