@@ -99,19 +99,17 @@ class MAPPO:
         surr1 = imp_weights * sample.advantages
         surr2 = torch.clamp(imp_weights, 1.0 - self.clip_param,
                             1.0 + self.clip_param) * sample.advantages
+        assert surr1.shape[-1] == surr2.shape[-1] == 1
 
         if self._use_policy_active_masks:
-            policy_action_loss = (
-                -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True) *
+            policy_loss = (
+                -torch.min(surr1, surr2) *
                 sample.active_masks).sum() / sample.active_masks.sum()
             dist_entropy = (dist_entropy * sample.active_masks
                             ).sum() / sample.active_masks.sum()
         else:
-            policy_action_loss = -torch.sum(
-                torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
+            policy_loss = -torch.min(surr1, surr2).mean()
             dist_entropy = dist_entropy.mean()
-
-        policy_loss = policy_action_loss - dist_entropy * self.entropy_coef
 
         value_loss = self.cal_value_loss(values, sample.value_preds,
                                          sample.returns, sample.active_masks)
@@ -119,7 +117,7 @@ class MAPPO:
         self.actor_optimizer.zero_grad()
 
         if update_actor:
-            policy_loss.backward()
+            (policy_loss - dist_entropy * self.entropy_coef).backward()
 
         if self._use_max_grad_norm:
             actor_grad_norm = nn.utils.clip_grad_norm_(

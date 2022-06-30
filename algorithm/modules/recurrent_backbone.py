@@ -7,7 +7,11 @@ class RecurrentBackbone(nn.Module):
 
     @property
     def feature_dim(self):
-        return self.__feature_dim
+        return self._feature_dim
+
+    @property
+    def rnn_type(self):
+        return self._rnn_type
 
     def __init__(
         self,
@@ -34,8 +38,8 @@ class RecurrentBackbone(nn.Module):
             raise NotImplementedError(
                 f"Activation function {activation} not implemented.")
 
-        self.__feature_dim = hidden_dim
-        self.__rnn_type = rnn_type
+        self._feature_dim = hidden_dim
+        self._rnn_type = rnn_type
         self.fc = modules.mlp([obs_dim, *([hidden_dim] * dense_layers)],
                               act_fn,
                               layernorm=layernorm)
@@ -51,7 +55,7 @@ class RecurrentBackbone(nn.Module):
             self.rnn = modules.AutoResetRNN(hidden_dim,
                                             hidden_dim,
                                             num_layers=num_rnn_layers,
-                                            rnn_type=self.__rnn_type)
+                                            rnn_type=rnn_type)
             self.rnn_norm = nn.LayerNorm([hidden_dim])
             for k, p in self.rnn.named_parameters():
                 if 'weight' in k and len(p.data.shape) >= 2:
@@ -60,9 +64,9 @@ class RecurrentBackbone(nn.Module):
                 if 'bias' in k:
                     nn.init.zeros_(p.data)
 
-    def forward(self, obs, hx, on_reset=None):
+    def forward(self, obs, hx, mask):
         features = self.fc(obs)
         if self.num_rnn_layers > 0:
-            features, hx = self.rnn(features, hx, on_reset)
+            features, hx = self.rnn(features, hx, mask)
             features = self.rnn_norm(features)
         return features, hx

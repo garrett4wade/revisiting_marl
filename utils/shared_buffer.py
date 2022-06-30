@@ -74,6 +74,7 @@ class SharedReplayBuffer(object):
             raise NotImplementedError()
 
         self.storage = SampleBatch(
+            # NOTE: sampled available actions should be 1
             obs=obs_space.sample(),
             value_preds=torch.zeros(1),
             returns=torch.zeros(1),
@@ -111,12 +112,15 @@ class SharedReplayBuffer(object):
         self.storage.bad_masks[self.step + 1] = sample.bad_masks
         self.storage.active_masks[self.step + 1] = sample.active_masks
 
-        self.step += 1
+        self.step = (self.step + 1) % self.episode_length
 
     def after_update(self):
         self.storage[0] = self.storage[-1]
-        assert self.step == self.episode_length, self.step
-        self.step = 0
+        assert self.step == 0, self.step
+        assert (self.storage.actions[-1] == 0).all()
+        assert (self.storage.returns[-1] == 0).all()
+        assert (self.storage.rewards[-1] == 0).all()
+        assert (self.storage.action_log_probs[-1] == 0).all()
 
     def compute_returns(self, value_normalizer=None):
         """
@@ -157,6 +161,7 @@ class SharedReplayBuffer(object):
                                                                        1] * gae
                     self.storage.returns[step] = gae + value_preds[step]
             else:
+                self.storage.returns[-1] = value_preds[-1]
                 for step in reversed(range(self.episode_length)):
                     self.storage.returns[step] = self.storage.returns[
                         step + 1] * self.gamma * masks[step +

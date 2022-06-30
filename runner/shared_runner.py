@@ -139,6 +139,7 @@ class SharedRunner:
                     data = SampleBatch(
                         obs=obs,
                         value_preds=rollout_result.value,
+                        # TODO: return default None
                         returns=None,
                         actions=rollout_result.action,
                         action_log_probs=rollout_result.log_prob,
@@ -211,11 +212,12 @@ class SharedRunner:
 
     def train(self):
         train_infos = defaultdict(lambda: 0)
+        self.trainer.prep_training()
         for _ in range(self.all_args.sample_reuse):
-            self.trainer.prep_training()
             train_info = self.trainer.train(self.buffer)
             for k, v in train_info.items():
                 train_infos[k] += v
+        self.policy.inc_version()
         self.buffer.after_update()
         return {
             k: v / self.all_args.sample_reuse

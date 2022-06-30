@@ -17,7 +17,7 @@ class PolicyState:
     critic_hx: torch.Tensor
 
 
-def init(module, weight_init, bias_init, gain=1):
+def init(module, weight_init, bias_init, gain):
     weight_init(module.weight.data, gain=gain)
     bias_init(module.bias.data)
     return module
@@ -97,6 +97,8 @@ class Actor(nn.Module):
                 f"Action space {action_space} not implemented.")
 
     def forward(self, obs, rnn_states, masks, available_actions=None):
+        if hasattr(self, "feature_norm"):
+            obs = self.feature_norm(obs)
         x, rnn_states = self.base(obs, rnn_states, masks)
 
         if self.action_type == 'multidiscrete':
@@ -138,6 +140,9 @@ class Critic(nn.Module):
         **kwargs,
     ):
         super(Critic, self).__init__()
+
+        if use_feature_normalization:
+            self.feature_norm = nn.LayerNorm(state_dim)
         self.base = modules.RecurrentBackbone(state_dim, num_dense_layers,
                                               hidden_dim, rnn_type,
                                               num_rnn_layers, dense_layer_gain,
@@ -153,8 +158,10 @@ class Critic(nn.Module):
             self.v_out = get_initialized_linear(self.base.feature_dim,
                                                 critic_dim, v_out_gain)
 
-    def forward(self, cent_obs, rnn_states, masks):
-        critic_features, rnn_states = self.base(cent_obs, rnn_states)
+    def forward(self, state, rnn_states, masks):
+        if hasattr(self, "feature_norm"):
+            state = self.feature_norm(state)
+        critic_features, rnn_states = self.base(state, rnn_states, masks)
         values = self.v_out(critic_features)
         return values, rnn_states
 
@@ -188,10 +195,8 @@ class ActorCriticPolicy:
             device=torch.device("cuda:0"),
             **kwargs,
     ):
-        self.__rnn_hidden_dim = hidden_dim
-        self.__popart = popart
-        self.__value_dim = value_dim
-        self.device = device
+        self._popart = popart
+        self._device = device
         self._num_rnn_layers = num_rnn_layers
 
         x = observation_space.sample()
@@ -212,6 +217,10 @@ class ActorCriticPolicy:
             num_rnn_layers, hidden_dim)
 
         self._version = 0
+
+    @property
+    def device(self):
+        return self._device
 
     @property
     def version(self):
@@ -246,7 +255,7 @@ class ActorCriticPolicy:
 
     @property
     def popart_head(self):
-        return self.critic.v_out if self.__popart else None
+        return self.critic.v_out if self._popart else None
 
     def normalize_value(self, x):
         return self.popart_head.normalize(x)
@@ -309,7 +318,7 @@ class ActorCriticPolicy:
         requests = recursive_apply(requests, lambda x: x.unsqueeze(0))
         obs = requests.obs.obs
         if hasattr(requests.obs, "state"):
-            state = requests.state
+            state = requests.obs.state
         else:
             state = obs
         actor_hx = requests.policy_state.actor_hx[0].transpose(0, 1)
@@ -329,15 +338,12 @@ class ActorCriticPolicy:
 
         if self.actor.action_type == 'discrete' or self.actor.action_type == 'multidiscrete':
             if deterministic:
-                # .squeeze(0) removes the time dimension
                 actions = torch.stack(
                     [dist.probs.argmax(dim=-1) for dist in action_dists],
                     dim=-1)
             else:
-                # dist.sample adds an additional dimension
-                actions = torch.stack(
-                    [dist.sample().squeeze(0) for dist in action_dists],
-                    dim=-1)
+                actions = torch.stack([dist.sample() for dist in action_dists],
+                                      dim=-1)
             log_probs = torch.sum(torch.stack([
                 dist.log_prob(actions[..., i])
                 for i, dist in enumerate(action_dists)
