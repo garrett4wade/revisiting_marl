@@ -1,29 +1,30 @@
 from collections import defaultdict
 import time
 import os
+import multiprocessing as mp
 import numpy as np
 from itertools import chain
 import torch
+import queue
 import wandb
 from tensorboardX import SummaryWriter
-from utils.shared_buffer import SharedReplayBuffer
 
 from algorithm.trainers.mappo import MAPPO
 from algorithm.policy import RolloutRequest, RolloutResult
 from algorithm.trainer import SampleBatch
+from algorithm.modules import gae_trace, masked_normalization
 from utils.namedarray import recursive_apply
 from utils.timing import Timing
 
 
 class SharedRunner:
 
-    def __init__(self, config, policy):
+    def __init__(self, all_args, run_dir, storage, policy, env_ctrls,
+                 info_queue, device):
 
-        self.all_args = config['all_args']
-        self.envs = config['envs']
-        self.eval_envs = config['eval_envs']
-        self.device = config['device']
-        self.num_agents = config['num_agents']
+        self.all_args = all_args
+        self.device = device
+        self.num_agents = all_args.num_agents
 
         # parameters
         self.env_name = self.all_args.env_name
@@ -44,7 +45,7 @@ class SharedRunner:
 
         if self.use_render:
             import imageio
-            self.run_dir = config["run_dir"]
+            self.run_dir = run_dir
             self.gif_dir = str(self.run_dir / 'gifs')
             if not os.path.exists(self.gif_dir):
                 os.makedirs(self.gif_dir)
@@ -53,7 +54,7 @@ class SharedRunner:
                 self.save_dir = str(wandb.run.dir)
                 self.run_dir = str(wandb.run.dir)
             else:
-                self.run_dir = config["run_dir"]
+                self.run_dir = run_dir
                 self.log_dir = str(self.run_dir / 'logs')
                 if not os.path.exists(self.log_dir):
                     os.makedirs(self.log_dir)
@@ -62,34 +63,17 @@ class SharedRunner:
                 if not os.path.exists(self.save_dir):
                     os.makedirs(self.save_dir)
 
+        self.storage = storage
         self.policy = policy
+        self.env_ctrls = env_ctrls
+        self.info_queue = info_queue
 
         if self.model_dir is not None:
             self.restore()
 
-        self.buffer = SharedReplayBuffer(
-            self.num_agents,
-            self.envs.observation_spaces[0],
-            self.envs.action_spaces[0],
-            self.episode_length,
-            self.n_rollout_threads,
-            self.all_args.gamma,
-            self.all_args.gae_lambda,
-            self.policy.policy_state_space
-            if self.policy.num_rnn_layers > 0 else None,
-            device=self.device)
-
         self.trainer = MAPPO(self.all_args, self.policy)
 
     def run(self):
-
-        def to_tensor(x):
-            return torch.from_numpy(x).to(self.device)
-
-        obs = self.envs.reset()
-        self.buffer.storage.obs[0] = recursive_apply(
-            obs, lambda x: torch.from_numpy(x).to(self.device))
-
         start = time.time()
         episodes = int(self.num_env_steps
                        ) // self.episode_length // self.n_rollout_threads
@@ -101,62 +85,61 @@ class SharedRunner:
 
             for step in range(self.episode_length):
                 # Sample actions
+                with timing.add_time("envstep"):
+                    for ctrl in self.env_ctrls:
+                        ctrl.obs_ready.acquire()
+
                 with timing.add_time("inference"):
                     rollout_result = self.collect(step)
 
-                with timing.add_time("envstep"):
-                    # Obser reward and next obs
-                    actions = recursive_apply(rollout_result.action,
-                                              lambda x: x.cpu().numpy())
-                    (obs, rewards, dones, infos) = self.envs.step(actions)
-                    (obs, rewards,
-                     dones) = map(lambda x: recursive_apply(x, to_tensor),
-                                  (obs, rewards, dones))
-                    assert rewards.shape == (self.n_rollout_threads, self.num_agents, 1), rewards.shape
-                    assert dones.shape == (self.n_rollout_threads, self.num_agents, 1), dones.shape
+                with timing.add_time("storage"):
+                    step = self.storage.step
 
-                    for (done, info) in zip(dones, infos):
-                        if done.all():
-                            train_ep_ret += info[0]['episode']['r']
-                            train_ep_cnt += 1
-                            train_ep_length += info[0]['episode']['l']
+                    self.storage.value_preds[step] = rollout_result.value
+                    self.storage.actions[step] = rollout_result.action.float()
+                    self.storage.action_log_probs[
+                        step] = rollout_result.log_prob
+                    if self.storage.policy_state is not None:
+                        self.storage.policy_state[
+                            step + 1] = rollout_result.policy_state
 
-                with timing.add_time("buffer"):
-                    dones_env = dones.all(1, keepdim=True).float()
-                    masks = 1 - dones_env
+                    self.storage.step += 1
 
-                    active_masks = 1 - dones
-                    active_masks = active_masks * (1 - dones_env) + dones_env
+                for ctrl in self.env_ctrls:
+                    ctrl.act_ready.release()
 
-                    bad_masks = torch.tensor(
-                        [[[0.0]
-                          if info[agent_id].get('bad_transition') else [1.0]
-                          for agent_id in range(self.num_agents)]
-                         for info in infos],
-                        dtype=torch.float32,
-                        device=self.device)
+            for ctrl in self.env_ctrls:
+                ctrl.obs_ready.acquire()
 
-                    data = SampleBatch(
-                        obs=obs,
-                        value_preds=rollout_result.value,
-                        # TODO: return default None
-                        returns=None,
-                        actions=rollout_result.action,
-                        action_log_probs=rollout_result.log_prob,
-                        rewards=rewards,
-                        masks=masks,
-                        active_masks=active_masks,
-                        bad_masks=bad_masks)
-
-                    # insert data into buffer
-                    self.buffer.insert(data)
+            while True:
+                try:
+                    info = self.info_queue.get_nowait()
+                    train_ep_ret += info['episode']['r']
+                    train_ep_length += info['episode']['l']
+                    train_ep_cnt += 1
+                except queue.Empty:
+                    break
 
             # compute return and update network
             with timing.add_time("gae"):
+                assert self.storage.step == self.episode_length
                 rollout_result = self.collect(self.episode_length)
-                self.buffer.storage.value_preds[self.episode_length] = rollout_result.value
-                self.buffer.compute_returns(
-                    value_normalizer=self.policy.popart_head)
+                self.storage.value_preds[
+                    self.episode_length] = rollout_result.value
+                if self.policy.popart_head is not None:
+                    trace_target_value = self.policy.denormalize_value(
+                        self.storage.value_preds.to(self.device)).cpu()
+                else:
+                    trace_target_value = self.storage.value_preds
+                adv = gae_trace(self.storage.rewards, trace_target_value,
+                                self.storage.masks, self.all_args.gamma,
+                                self.all_args.gae_lambda,
+                                self.storage.bad_masks)
+                self.storage.returns = adv + trace_target_value
+                self.storage.advantages = adv
+                self.storage.advantages[:-1] = masked_normalization(
+                    adv[:-1], mask=self.storage.active_masks[:-1])
+
             with timing.add_time("train"):
                 train_infos = self.train()
 
@@ -200,25 +183,33 @@ class SharedRunner:
         trainer = self.trainer
         trainer.prep_rollout()
         request = RolloutRequest(
-            self.buffer.storage.obs[step],
-            self.buffer.storage.policy_state[step]
-            if self.buffer.storage.policy_state is not None else None,
-            self.buffer.storage.masks[step])
-        request = recursive_apply(request, lambda x: x.flatten(end_dim=1))
+            self.storage.obs[step], self.storage.policy_state[step]
+            if self.storage.policy_state is not None else None,
+            self.storage.masks[step])
+        request = recursive_apply(
+            request, lambda x: x.flatten(end_dim=1).to(self.device))
         rollout_result = trainer.policy.rollout(request, deterministic=False)
         return recursive_apply(
             rollout_result, lambda x: x.view(self.n_rollout_threads, self.
-                                             num_agents, *x.shape[1:]))
+                                             num_agents, *x.shape[1:]).cpu())
 
     def train(self):
         train_infos = defaultdict(lambda: 0)
         self.trainer.prep_training()
         for _ in range(self.all_args.sample_reuse):
-            train_info = self.trainer.train(self.buffer)
+            train_info = self.trainer.train(
+                recursive_apply(self.storage[:-1],
+                                lambda x: x.to(self.device)))
             for k, v in train_info.items():
                 train_infos[k] += v
         self.policy.inc_version()
-        self.buffer.after_update()
+
+        self.storage[0] = self.storage[-1]
+        assert self.storage.step == self.episode_length
+        self.storage.step %= self.episode_length
+        for ctrl in self.env_ctrls:
+            ctrl.obs_ready.release()
+
         return {
             k: v / self.all_args.sample_reuse
             for k, v in train_infos.items()

@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
+from algorithm.trainer import feed_forward_generator, recurrent_generator
 from utils.shared_buffer import SampleBatch
 
 
@@ -141,15 +142,15 @@ class MAPPO:
 
         return value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, imp_weights
 
-    def train(self, buffer, update_actor=True):
+    def train(self, storage, update_actor=True):
         train_info = defaultdict(lambda: 0)
 
         for _ in range(self.ppo_epoch):
             if self.policy.num_rnn_layers > 0:
-                data_generator = buffer.recurrent_generator(
+                data_generator = recurrent_generator(storage,
                     self.num_mini_batch, self.data_chunk_length)
             else:
-                data_generator = buffer.feed_forward_generator(
+                data_generator = feed_forward_generator(storage,
                     self.num_mini_batch)
 
             for sample in data_generator:

@@ -6,14 +6,18 @@ import wandb
 
 import socket
 import setproctitle
+import gym
 import numpy as np
 from pathlib import Path
 import torch
 import yaml
 from configs.config import get_config
-from environment.env_wrappers import SubprocVecEnv
+from environment.env_wrappers import shared_env_worker, EnvironmentControl, TorchTensorWrapper
+import multiprocessing as mp
 from runner.shared_runner import SharedRunner
 
+from algorithm.trainer import SampleBatch
+from utils.namedarray import recursive_apply
 import algorithm.policy
 import environment.env_base as env_base
 
@@ -95,38 +99,77 @@ def main(args):
     np.random.seed(all_args.seed)
 
     # env
-    envs = SubprocVecEnv([
-        lambda: env_base.make(environment_config, split='train')
-        for rank in range(all_args.n_rollout_threads)
-    ])
+    example_env = TorchTensorWrapper(
+        env_base.make(environment_config, split='train'), device)
+    act_space = example_env.action_spaces[0]
+    obs_space = example_env.observation_spaces[0]
+    all_args.num_agents = num_agents = example_env.num_agents
+    del example_env
+
+    policy = algorithm.policy.make(policy_config, obs_space, act_space)
+
+    if isinstance(act_space, gym.spaces.Discrete):
+        act_dim = 1
+    elif isinstance(act_space, gym.spaces.Box):
+        act_dim = act_space.shape[0]
+    elif isinstance(act_space, gym.spaces.MultiDiscrete):
+        act_dim = act_space.nvec
+    else:
+        raise NotImplementedError()
+
+    # initialze storage
+    storage = SampleBatch(
+        # NOTE: sampled available actions should be 1
+        obs=obs_space.sample(),
+        value_preds=torch.zeros(1),
+        actions=torch.zeros(act_dim),
+        action_log_probs=torch.zeros(1),
+        rewards=torch.zeros(1),
+        masks=torch.ones(1),
+        active_masks=torch.ones(1),
+        bad_masks=torch.ones(1),
+    )
+
+    if policy.num_rnn_layers > 0:
+        storage.policy_state = policy.policy_state_space.sample()
+
+    storage = recursive_apply(
+        storage,
+        lambda x: x.repeat(all_args.episode_length + 1, all_args.
+                           n_rollout_threads, num_agents,
+                           *((1, ) * len(x.shape))).share_memory_(),
+    )
+    storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
+
+    # initialize communication utilities
+    env_ctrls = [
+        EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event())
+        for _ in range(all_args.n_rollout_threads)
+    ]
+    info_queue = mp.Queue(1000)
+
+    # start worker
+    # TODO: config env number
+    env_workers = [
+        mp.Process(
+            target=shared_env_worker,
+            args=(i, [environment_config], env_ctrls[i], storage, info_queue),
+        ) for i in range(all_args.n_rollout_threads)
+    ]
+    for worker in env_workers:
+        worker.start()
+
+    # TODO: eval and render
     if all_args.use_render:
-        eval_envs = SubprocVecEnv([
-            lambda: env_base.make(environment_config, split='render')
-            for rank in range(all_args.n_render_rollout_threads)
-        ])
+        raise NotImplementedError
     elif all_args.use_eval:
-        eval_envs = SubprocVecEnv([
-            lambda: env_base.make(environment_config, split='eval')
-            for rank in range(all_args.n_eval_rollout_threads)
-        ])
+        raise NotImplementedError
     else:
         eval_envs = None
-    num_agents = envs.num_agents
-    all_args.num_agents = num_agents
 
-    policy = algorithm.policy.make(policy_config, envs.observation_spaces[0],
-                                   envs.action_spaces[0])
-
-    config = {
-        "all_args": all_args,
-        "envs": envs,
-        "eval_envs": eval_envs,
-        "num_agents": num_agents,
-        "device": device,
-        "run_dir": run_dir
-    }
     # run experiments
-    runner = SharedRunner(config, policy)
+    runner = SharedRunner(all_args, run_dir, storage, policy, env_ctrls,
+                          info_queue, device)
     if not all_args.use_render:
         runner.run()
     else:
@@ -135,9 +178,10 @@ def main(args):
         runner.eval(0, render=True)
 
     # post process
-    envs.close()
-    if all_args.use_eval and eval_envs is not envs:
-        eval_envs.close()
+    for ctrl in env_ctrls:
+        ctrl.exit_.set()
+    for worker in env_workers:
+        worker.join()
 
     if all_args.use_wandb:
         run.finish()
