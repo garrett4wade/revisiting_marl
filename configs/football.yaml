@@ -1,7 +1,9 @@
 base:
   n_rollout_threads: 50
   episode_length: 200
-  total_num_steps: 2.5e+6
+  num_env_steps: 5.0e+7
+  ppo_epoch: 10
+  num_mini_batch: 2
   use_wandb: True
 
 policy:
