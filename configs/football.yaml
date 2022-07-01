@@ -1,10 +1,16 @@
 base:
-  n_rollout_threads: 50
+  n_rollout_threads: 4
   episode_length: 200
   num_env_steps: 5.0e+7
   ppo_epoch: 10
   num_mini_batch: 2
-  use_wandb: True
+  use_eval: True
+  eval_episodes: 32
+  eval_interval: 5
+  n_eval_rollout_threads: 4
+  use_wandb: False
+  wandb_project: fast_mappo_football
+  wandb_group: check
 
 policy:
   type: actor-critic

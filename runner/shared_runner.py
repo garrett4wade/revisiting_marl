@@ -13,14 +13,15 @@ from algorithm.trainers.mappo import MAPPO
 from algorithm.policy import RolloutRequest, RolloutResult
 from algorithm.trainer import SampleBatch
 from algorithm.modules import gae_trace, masked_normalization
-from utils.namedarray import recursive_apply
+from utils.namedarray import recursive_apply, array_like
 from utils.timing import Timing
 
 
 class SharedRunner:
 
-    def __init__(self, all_args, run_dir, storage, policy, env_ctrls,
-                 info_queue, device):
+    def __init__(self, all_args, run_dir, policy, storage, env_ctrls,
+                 info_queue, eval_storage, eval_env_ctrls, eval_info_queue,
+                 device):
 
         self.all_args = all_args
         self.device = device
@@ -67,6 +68,10 @@ class SharedRunner:
         self.policy = policy
         self.env_ctrls = env_ctrls
         self.info_queue = info_queue
+
+        self.eval_storage = eval_storage
+        self.eval_env_ctrls = eval_env_ctrls
+        self.eval_info_queue = eval_info_queue
 
         if self.model_dir is not None:
             self.restore()
@@ -152,8 +157,9 @@ class SharedRunner:
                 self.save()
 
             # log information
-            if episode % self.log_interval == 0:
+            if episode % self.log_interval == 0 or episode == episodes - 1:
                 end = time.time()
+                # TODO: use logger
                 print(
                     "\n Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n"
                     .format(self.experiment_name, episode, episodes,
@@ -173,10 +179,9 @@ class SharedRunner:
                 self.log_info(train_infos, total_num_steps)
 
             # eval
-            if episode % self.eval_interval == 0 and self.use_eval:
-                # TODO: add eval
-                pass
-                # self.eval(total_num_steps)
+            if (episode % self.eval_interval == 0
+                    or episode == episodes - 1) and self.use_eval:
+                self.eval(total_num_steps)
 
     @torch.no_grad()
     def collect(self, step) -> RolloutResult:
@@ -214,6 +219,56 @@ class SharedRunner:
             k: v / self.all_args.sample_reuse
             for k, v in train_infos.items()
         }
+
+    def eval(self, step):
+        for ctrl in self.eval_env_ctrls:
+            ctrl.eval_finish.clear()
+            ctrl.eval_start.set()
+
+        self.trainer.prep_rollout()
+        if self.storage.policy_state is not None:
+            policy_state = array_like(self.storage.policy_state[0],
+                                      default_value=0)
+        else:
+            policy_state = None
+        eval_ep_cnt = eval_ep_len = eval_ep_ret = 0
+
+        while eval_ep_cnt < self.all_args.eval_episodes:
+            for ctrl in self.eval_env_ctrls:
+                ctrl.obs_ready.acquire()
+
+            while True:
+                try:
+                    info = self.eval_info_queue.get_nowait()
+                    eval_ep_ret += info['episode']['r']
+                    eval_ep_len += info['episode']['l']
+                    eval_ep_cnt += 1
+                except queue.Empty:
+                    break
+
+            request = RolloutRequest(self.eval_storage.obs, policy_state,
+                                     self.eval_storage.masks)
+            request = recursive_apply(
+                request, lambda x: x.flatten(end_dim=1).to(self.device))
+            rollout_result = recursive_apply(
+                self.policy.rollout(request, deterministic=True),
+                lambda x: x.view(self.n_rollout_threads, self.num_agents, *x.
+                                 shape[1:]).cpu())
+
+            self.eval_storage.actions[:] = rollout_result.action.float()
+            policy_state = rollout_result.policy_state
+
+            for ctrl in self.eval_env_ctrls:
+                ctrl.act_ready.release()
+
+        for ctrl in self.eval_env_ctrls:
+            ctrl.eval_start.clear()
+            ctrl.eval_finish.set()
+
+        eval_info = dict(eval_episode_return=eval_ep_ret / eval_ep_cnt,
+                         eval_episode_length=eval_ep_len / eval_ep_cnt)
+        self.log_info(eval_info, step)
+        print(eval_info)
 
     def save(self):
         torch.save(self.policy.get_checkpoint(),

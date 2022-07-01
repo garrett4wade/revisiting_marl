@@ -321,6 +321,7 @@ class ActorCriticPolicy:
             state = requests.obs.state
         else:
             state = obs
+        # TODO: totally remove policy state for MLP
         actor_hx = requests.policy_state.actor_hx[0].transpose(0, 1)
         critic_hx = requests.policy_state.critic_hx[0].transpose(0, 1)
 

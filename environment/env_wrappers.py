@@ -1,7 +1,9 @@
+from typing import Optional
 import dataclasses
 import gym
 import multiprocessing as mp
 import numpy as np
+import time
 import torch
 import queue
 
@@ -35,22 +37,28 @@ class EnvironmentControl:
     act_ready: mp.Semaphore
     obs_ready: mp.Semaphore
     exit_: mp.Event
+    eval_start: Optional[mp.Event] = None
+    eval_finish: Optional[mp.Event] = None
+
+
+def _check_shm(x):
+    assert isinstance(x, torch.Tensor) and x.is_shared
 
 
 def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
                       storage: SampleBatch, info_queue: mp.Queue):
 
-    def _check_shm(x):
-        assert isinstance(x, torch.Tensor) and x.is_shared
-
     recursive_apply(storage, _check_shm)
 
-    # TODO: seed
-    envs = [
-        TorchTensorWrapper(env_base.make(environment_config))
-        for environment_config in environment_configs
-    ]
-    offset = rank * len(envs)
+    offset = rank * len(environment_configs)
+    envs = []
+    for i, cfg in enumerate(environment_configs):
+        if cfg['args'].get('base'):
+            cfg['args']['base']['seed'] = offset + i
+        else:
+            cfg['args']['base'] = dict(seed=offset + i)
+        env = TorchTensorWrapper(env_base.make(cfg, split='train'))
+        envs.append(env)
 
     for i, env in enumerate(envs):
         obs = env.reset()
@@ -89,3 +97,50 @@ def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
                 storage.bad_masks[step, offset + i] = bad_mask
 
             env_ctrl.obs_ready.release()
+
+
+def shared_eval_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
+                       storage: SampleBatch, info_queue: mp.Queue):
+
+    recursive_apply(storage, _check_shm)
+
+    offset = rank * len(environment_configs)
+    envs = []
+    for i, cfg in enumerate(environment_configs):
+        if cfg['args'].get('base'):
+            cfg['args']['base']['seed'] = 100000 + offset + i
+        else:
+            cfg['args']['base'] = dict(seed=100000 + offset + i)
+        env = TorchTensorWrapper(env_base.make(cfg, split='eval'))
+        envs.append(env)
+
+    while not env_ctrl.exit_.is_set():
+
+        if not env_ctrl.eval_start.is_set():
+            time.sleep(5)
+            continue
+
+        for i, env in enumerate(envs):
+            obs = env.reset()
+            storage.obs[offset + i] = obs
+        env_ctrl.obs_ready.release()
+
+        while not env_ctrl.eval_finish.is_set():
+
+            if env_ctrl.act_ready.acquire(timeout=0.1):
+
+                for i, env in enumerate(envs):
+                    act = storage.actions[offset + i]
+                    obs, reward, done, info = env.step(act)
+                    if done.all():
+                        obs = env.reset()
+                        try:
+                            info_queue.put_nowait(info[0])
+                        except queue.Full:
+                            pass
+
+                    storage.obs[offset + i] = obs
+                    done_env = done.all(1, keepdim=True).float()
+                    storage.masks[offset + i] = 1 - done_env
+
+                env_ctrl.obs_ready.release()

@@ -3,8 +3,7 @@ import math
 import torch
 import torch.nn as nn
 
-from algorithm.trainer import feed_forward_generator, recurrent_generator
-from utils.shared_buffer import SampleBatch
+from algorithm.trainer import SampleBatch, feed_forward_generator, recurrent_generator
 
 
 def get_gard_norm(it):
@@ -103,9 +102,8 @@ class MAPPO:
         assert surr1.shape[-1] == surr2.shape[-1] == 1
 
         if self._use_policy_active_masks:
-            policy_loss = (
-                -torch.min(surr1, surr2) *
-                sample.active_masks).sum() / sample.active_masks.sum()
+            policy_loss = (-torch.min(surr1, surr2) * sample.active_masks
+                           ).sum() / sample.active_masks.sum()
             dist_entropy = (dist_entropy * sample.active_masks
                             ).sum() / sample.active_masks.sum()
         else:
@@ -148,10 +146,11 @@ class MAPPO:
         for _ in range(self.ppo_epoch):
             if self.policy.num_rnn_layers > 0:
                 data_generator = recurrent_generator(storage,
-                    self.num_mini_batch, self.data_chunk_length)
+                                                     self.num_mini_batch,
+                                                     self.data_chunk_length)
             else:
-                data_generator = feed_forward_generator(storage,
-                    self.num_mini_batch)
+                data_generator = feed_forward_generator(
+                    storage, self.num_mini_batch)
 
             for sample in data_generator:
                 (value_loss, critic_grad_norm, policy_loss, dist_entropy,

@@ -1,33 +1,30 @@
 #!/usr/bin/env python
-import sys
-import os
-
-import wandb
-
-import socket
-import setproctitle
-import gym
-import numpy as np
 from pathlib import Path
-import torch
-import yaml
-from configs.config import get_config
-from environment.env_wrappers import shared_env_worker, EnvironmentControl, TorchTensorWrapper
+import gym
+import itertools
 import multiprocessing as mp
-from runner.shared_runner import SharedRunner
+import numpy as np
+import os
+import setproctitle
+import socket
+import sys
+import torch
+import wandb
+import yaml
 
 from algorithm.trainer import SampleBatch
+from configs.config import get_base_config, make_config
+from environment.env_wrappers import shared_env_worker, shared_eval_worker, EnvironmentControl, TorchTensorWrapper
+from runner.shared_runner import SharedRunner
 from utils.namedarray import recursive_apply
 import algorithm.policy
 import environment.env_base as env_base
 
 
 def main(args):
-    parser = get_config()
+    parser = get_base_config()
     all_args = parser.parse_known_args(args)[0]
-    # TODO: register yaml file
-    with open(os.path.join('configs', all_args.config + ".yaml")) as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
+    config = make_config(all_args.config)
     for k, v in config.get("base", {}).items():
         setattr(all_args, k, v)
     policy_config = config['policy']
@@ -61,13 +58,15 @@ def main(args):
         os.makedirs(str(run_dir))
 
     if all_args.use_wandb:
-        # TODO: control by config directly
         run = wandb.init(config=all_args,
-                         project=all_args.env_name,
-                         group=all_args.experiment_name,
+                         project=all_args.wandb_project
+                         if all_args.wandb_project else all_args.env_name,
+                         group=all_args.wandb_group
+                         if all_args.wandb_group else all_args.experiment_name,
                          entity=all_args.user_name,
                          notes=socket.gethostname(),
-                         name=str(all_args.experiment_name) + "_seed" +
+                         name=all_args.wandb_name if all_args.wandb_name else
+                         str(all_args.experiment_name) + "_seed" +
                          str(all_args.seed),
                          dir=str(run_dir),
                          job_type="training",
@@ -141,12 +140,34 @@ def main(args):
     )
     storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
 
+    eval_storage = SampleBatch(
+        obs=obs_space.sample(),
+        masks=torch.ones(1),
+        actions=torch.zeros(act_dim),
+        value_preds=None,
+        action_log_probs=None,
+        rewards=None,
+        active_masks=None,
+        bad_masks=None,
+    )
+    eval_storage = recursive_apply(
+        eval_storage,
+        lambda x: x.repeat(all_args.n_eval_rollout_threads, num_agents,
+                           *((1, ) * len(x.shape))).share_memory_(),
+    )
+
     # initialize communication utilities
     env_ctrls = [
         EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event())
         for _ in range(all_args.n_rollout_threads)
     ]
+    eval_env_ctrls = [
+        EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event(),
+                           mp.Event(), mp.Event())
+        for _ in range(all_args.n_rollout_threads)
+    ]
     info_queue = mp.Queue(1000)
+    eval_info_queue = mp.Queue(all_args.n_eval_rollout_threads)
 
     # start worker
     # TODO: config env number
@@ -159,17 +180,26 @@ def main(args):
     for worker in env_workers:
         worker.start()
 
+    eval_workers = [
+        mp.Process(
+            target=shared_eval_worker,
+            args=(i, [environment_config], eval_env_ctrls[i], eval_storage,
+                  eval_info_queue),
+        ) for i in range(all_args.n_rollout_threads)
+    ]
+    for ew in eval_workers:
+        ew.start()
+
     # TODO: eval and render
     if all_args.use_render:
-        raise NotImplementedError
-    elif all_args.use_eval:
         raise NotImplementedError
     else:
         eval_envs = None
 
     # run experiments
-    runner = SharedRunner(all_args, run_dir, storage, policy, env_ctrls,
-                          info_queue, device)
+    runner = SharedRunner(all_args, run_dir, policy, storage, env_ctrls,
+                          info_queue, eval_storage, eval_env_ctrls,
+                          eval_info_queue, device)
     if not all_args.use_render:
         runner.run()
     else:
@@ -178,9 +208,9 @@ def main(args):
         runner.eval(0, render=True)
 
     # post process
-    for ctrl in env_ctrls:
+    for ctrl in itertools.chain(env_ctrls, eval_env_ctrls):
         ctrl.exit_.set()
-    for worker in env_workers:
+    for worker in itertools.chain(env_workers, eval_workers):
         worker.join()
 
     if all_args.use_wandb:

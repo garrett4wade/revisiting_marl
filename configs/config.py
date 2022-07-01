@@ -1,7 +1,9 @@
+from typing import Dict
 import argparse
+import yaml
 
 
-def get_config():
+def get_base_config():
     parser = argparse.ArgumentParser(
         description='faster_mappo',
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -15,6 +17,9 @@ def get_config():
         help=
         "[for wandb usage], to specify user's name for simply collecting training data."
     )
+    parser.add_argument("--wandb_project", type=str, default="")
+    parser.add_argument("--wandb_group", type=str, default="")
+    parser.add_argument("--wandb_name", type=str, default="")
 
     parser.add_argument("--sample_reuse", type=int, default=1)
 
@@ -240,3 +245,12 @@ def get_config():
         help="the play interval of each rendered image in saved video.")
 
     return parser
+
+
+ALL_CONFIGS = {"football": "configs/football.yaml"}
+
+
+def make_config(type_) -> Dict:
+    with open(ALL_CONFIGS[type_]) as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+    return config
