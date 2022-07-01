@@ -2,6 +2,7 @@
 from pathlib import Path
 import gym
 import itertools
+import logging
 import multiprocessing as mp
 import numpy as np
 import os
@@ -20,6 +21,17 @@ from utils.namedarray import recursive_apply
 import algorithm.policy
 import environment.env_base as env_base
 
+logging.basicConfig(
+    format=
+    "%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s")
+
+logger = logging.getLogger('main')
+logger.setLevel(logging.INFO)
+
+fh = logging.FileHandler('log.txt', mode='w')
+fh.setLevel(logging.DEBUG)
+logger.addHandler(fh)
+
 
 def main(args):
     parser = get_base_config()
@@ -31,22 +43,22 @@ def main(args):
     environment_config = config['environment']
     all_args.env_name = environment_config['type']
 
-    print("all config: ", all_args)
+    logger.info("all config: {}".format(all_args))
     if all_args.seed_specify:
         all_args.seed = all_args.runing_id
     else:
         all_args.seed = np.random.randint(1000, 10000)
-    print("seed is :", all_args.seed)
+    logger.info("seed is: {}".format(all_args.seed))
     # cuda
     if all_args.cuda and torch.cuda.is_available():
-        print("choose to use gpu...")
+        logger.info("choose to use gpu...")
         device = torch.device("cuda:0")
         torch.set_num_threads(all_args.n_training_threads)
         if all_args.cuda_deterministic:
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
     else:
-        print("choose to use cpu...")
+        logger.info("choose to use cpu...")
         device = torch.device("cpu")
         torch.set_num_threads(all_args.n_training_threads)
 
@@ -150,6 +162,8 @@ def main(args):
         active_masks=None,
         bad_masks=None,
     )
+    if policy.num_rnn_layers > 0:
+        eval_storage.policy_state = policy.policy_state_space.sample()
     eval_storage = recursive_apply(
         eval_storage,
         lambda x: x.repeat(all_args.n_eval_rollout_threads, num_agents,
@@ -164,7 +178,7 @@ def main(args):
     eval_env_ctrls = [
         EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event(),
                            mp.Event(), mp.Event())
-        for _ in range(all_args.n_rollout_threads)
+        for _ in range(all_args.n_eval_rollout_threads)
     ]
     info_queue = mp.Queue(1000)
     eval_info_queue = mp.Queue(all_args.n_eval_rollout_threads)
@@ -185,7 +199,7 @@ def main(args):
             target=shared_eval_worker,
             args=(i, [environment_config], eval_env_ctrls[i], eval_storage,
                   eval_info_queue),
-        ) for i in range(all_args.n_rollout_threads)
+        ) for i in range(all_args.n_eval_rollout_threads)
     ]
     for ew in eval_workers:
         ew.start()

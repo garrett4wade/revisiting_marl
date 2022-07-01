@@ -1,13 +1,13 @@
 from collections import defaultdict
-import time
-import os
+from tensorboardX import SummaryWriter
+import logging
 import multiprocessing as mp
 import numpy as np
-from itertools import chain
-import torch
+import os
 import queue
+import time
+import torch
 import wandb
-from tensorboardX import SummaryWriter
 
 from algorithm.trainers.mappo import MAPPO
 from algorithm.policy import RolloutRequest, RolloutResult
@@ -15,6 +15,13 @@ from algorithm.trainer import SampleBatch
 from algorithm.modules import gae_trace, masked_normalization
 from utils.namedarray import recursive_apply, array_like
 from utils.timing import Timing
+
+logger = logging.getLogger('shared_runner')
+logger.setLevel(logging.INFO)
+
+fh = logging.FileHandler('log.txt', mode='a')
+fh.setLevel(logging.DEBUG)
+logger.addHandler(fh)
 
 
 class SharedRunner:
@@ -148,7 +155,7 @@ class SharedRunner:
             with timing.add_time("train"):
                 train_infos = self.train()
 
-            print(timing)
+            logger.debug(timing)
             # post process
             total_num_steps = (
                 episode + 1) * self.episode_length * self.n_rollout_threads
@@ -160,20 +167,16 @@ class SharedRunner:
             if episode % self.log_interval == 0 or episode == episodes - 1:
                 end = time.time()
                 # TODO: use logger
-                print(
-                    "\n Exp {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n"
-                    .format(self.experiment_name, episode, episodes,
-                            total_num_steps, self.num_env_steps,
+                logger.info(
+                    "Updates {}/{} episodes, total num timesteps {}/{}, FPS {}."
+                    .format(episode, episodes, total_num_steps,
+                            self.num_env_steps,
                             int(total_num_steps / (end - start))))
 
                 if train_ep_cnt > 0:
                     train_env_info = dict(
                         train_episode_length=train_ep_length / train_ep_cnt,
                         train_episode_return=train_ep_ret / train_ep_cnt)
-                    print(
-                        "Average training episode return is {}, episode length is {}."
-                        .format(train_ep_ret / train_ep_cnt,
-                                train_ep_length / train_ep_cnt))
                     train_infos = {**train_env_info, **train_infos}
 
                 self.log_info(train_infos, total_num_steps)
@@ -216,7 +219,7 @@ class SharedRunner:
             ctrl.obs_ready.release()
 
         return {
-            k: v / self.all_args.sample_reuse
+            k: float(v / self.all_args.sample_reuse)
             for k, v in train_infos.items()
         }
 
@@ -227,7 +230,7 @@ class SharedRunner:
 
         self.trainer.prep_rollout()
         if self.storage.policy_state is not None:
-            policy_state = array_like(self.storage.policy_state[0],
+            policy_state = array_like(self.eval_storage.policy_state,
                                       default_value=0)
         else:
             policy_state = None
@@ -252,7 +255,7 @@ class SharedRunner:
                 request, lambda x: x.flatten(end_dim=1).to(self.device))
             rollout_result = recursive_apply(
                 self.policy.rollout(request, deterministic=True),
-                lambda x: x.view(self.n_rollout_threads, self.num_agents, *x.
+                lambda x: x.view(self.n_eval_rollout_threads, self.num_agents, *x.
                                  shape[1:]).cpu())
 
             self.eval_storage.actions[:] = rollout_result.action.float()
@@ -268,7 +271,6 @@ class SharedRunner:
         eval_info = dict(eval_episode_return=eval_ep_ret / eval_ep_cnt,
                          eval_episode_length=eval_ep_len / eval_ep_cnt)
         self.log_info(eval_info, step)
-        print(eval_info)
 
     def save(self):
         torch.save(self.policy.get_checkpoint(),
@@ -279,6 +281,12 @@ class SharedRunner:
         self.policy.load_checkpoint(checkpoint)
 
     def log_info(self, infos, step):
+        logger.info('-' * 40)
+        for k, v in infos.items():
+            key = ' '.join(k.split('_')).title()
+            logger.info("{}: \t{:.2f}".format(key, float(v)))
+        logger.info('-' * 40)
+
         if self.all_args.use_wandb:
             wandb.log(infos, step=step)
         else:

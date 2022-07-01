@@ -6,7 +6,8 @@ import logging
 import numpy as np
 import torch
 
-logger = logging.getLogger()
+logger = logging.getLogger("namedarray")
+logger.setLevel(logging.INFO)
 
 
 def _is_dataclass_instance(obj):
@@ -32,7 +33,7 @@ def _match_structure(template, value):
                 'namedarray - operation with a different data structure')
     else:
         if hasattr(value, "metadata") and value.metadata is not None:
-            logger.warning(
+            logger.debug(
                 "namedarray - metadata of the second operand is not None. It'll be ignored."
             )
     return value
