@@ -205,13 +205,6 @@ def get_base_config():
 
     # eval parameters
     parser.add_argument(
-        "--use_eval",
-        action='store_true',
-        default=False,
-        help=
-        "by default, do not start evaluation. If set`, start evaluation alongside with training."
-    )
-    parser.add_argument(
         "--eval_interval",
         type=int,
         default=25,
@@ -227,17 +220,8 @@ def get_base_config():
         action='store_true',
         default=False,
         help="by default, do not save render video. If set, save video.")
-    parser.add_argument(
-        "--use_render",
-        action='store_true',
-        default=False,
-        help=
-        "by default, do not render the env during training. If set, start render. Note: something, the environment has internal render process which is not controlled by this hyperparam."
-    )
-    parser.add_argument("--render_episodes",
-                        type=int,
-                        default=5,
-                        help="the number of episodes to render a given env")
+    parser.add_argument("--render", action='store_true', default=False)
+    parser.add_argument("--eval", action='store_true', default=False)
     parser.add_argument(
         "--ifi",
         type=float,

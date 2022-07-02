@@ -11,6 +11,8 @@ from algorithm.trainer import SampleBatch
 from utils.namedarray import recursive_aggregate, recursive_apply
 import environment.env_base as env_base
 
+RENDER_IDLE_TIME = 0.2
+
 
 class TorchTensorWrapper(gym.Wrapper):
 
@@ -79,7 +81,7 @@ def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
                     except queue.Full:
                         pass
 
-                done_env = done.all(1, keepdim=True).float()
+                done_env = done.all(0, keepdim=True).float()
                 mask = 1 - done_env
 
                 active_mask = 1 - done
@@ -99,10 +101,16 @@ def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
             env_ctrl.obs_ready.release()
 
 
-def shared_eval_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
-                       storage: SampleBatch, info_queue: mp.Queue):
+def shared_eval_worker(rank,
+                       environment_configs,
+                       env_ctrl: EnvironmentControl,
+                       storage: SampleBatch,
+                       info_queue: mp.Queue,
+                       render=False):
 
     recursive_apply(storage, _check_shm)
+    if render:
+        assert len(environment_configs) == 1
 
     offset = rank * len(environment_configs)
     envs = []
@@ -111,7 +119,8 @@ def shared_eval_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
             cfg['args']['base']['seed'] = 100000 + offset + i
         else:
             cfg['args']['base'] = dict(seed=100000 + offset + i)
-        env = TorchTensorWrapper(env_base.make(cfg, split='eval'))
+        env = TorchTensorWrapper(
+            env_base.make(cfg, split=('eval' if not render else "render")))
         envs.append(env)
 
     while not env_ctrl.exit_.is_set():
@@ -123,6 +132,9 @@ def shared_eval_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
         for i, env in enumerate(envs):
             obs = env.reset()
             storage.obs[offset + i] = obs
+            if render:
+                env.render()
+                time.sleep(RENDER_IDLE_TIME)
         env_ctrl.obs_ready.release()
 
         while not env_ctrl.eval_finish.is_set():
@@ -132,6 +144,10 @@ def shared_eval_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
                 for i, env in enumerate(envs):
                     act = storage.actions[offset + i]
                     obs, reward, done, info = env.step(act)
+                    if render:
+                        env.render()
+                        time.sleep(RENDER_IDLE_TIME)
+
                     if done.all():
                         obs = env.reset()
                         try:
@@ -140,7 +156,7 @@ def shared_eval_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
                             pass
 
                     storage.obs[offset + i] = obs
-                    done_env = done.all(1, keepdim=True).float()
+                    done_env = done.all(0, keepdim=True).float()
                     storage.masks[offset + i] = 1 - done_env
 
                 env_ctrl.obs_ready.release()

@@ -38,7 +38,13 @@ def main(args):
     all_args = parser.parse_known_args(args)[0]
     config = make_config(all_args.config)
     for k, v in config.get("base", {}).items():
-        setattr(all_args, k, v)
+        if f"--{k}" not in args:
+            setattr(all_args, k, v)
+        else:
+            logger.warning(f"CLI argument {k} conflicts with yaml config. "
+                           f"The latter will be overwritten "
+                           f"by CLI arguments {k}={getattr(all_args, k)}.")
+
     policy_config = config['policy']
     environment_config = config['environment']
     all_args.env_name = environment_config['type']
@@ -62,43 +68,44 @@ def main(args):
         device = torch.device("cpu")
         torch.set_num_threads(all_args.n_training_threads)
 
-    run_dir = Path(
-        os.path.split(os.path.dirname(os.path.abspath(__file__)))[0] +
-        "/results") / all_args.env_name / all_args.experiment_name / str(
-            all_args.seed)
-    if not run_dir.exists():
-        os.makedirs(str(run_dir))
-
-    if all_args.use_wandb:
-        run = wandb.init(config=all_args,
-                         project=all_args.wandb_project
-                         if all_args.wandb_project else all_args.env_name,
-                         group=all_args.wandb_group
-                         if all_args.wandb_group else all_args.experiment_name,
-                         entity=all_args.user_name,
-                         notes=socket.gethostname(),
-                         name=all_args.wandb_name if all_args.wandb_name else
-                         str(all_args.experiment_name) + "_seed" +
-                         str(all_args.seed),
-                         dir=str(run_dir),
-                         job_type="training",
-                         reinit=True)
-    else:
-        if not run_dir.exists():
-            curr_run = 'run1'
-        else:
-            exst_run_nums = [
-                int(str(folder.name).split('run')[1])
-                for folder in run_dir.iterdir()
-                if str(folder.name).startswith('run')
-            ]
-            if len(exst_run_nums) == 0:
-                curr_run = 'run1'
-            else:
-                curr_run = 'run%i' % (max(exst_run_nums) + 1)
-        run_dir = run_dir / curr_run
+    if not all_args.eval:
+        run_dir = (Path("results") / all_args.env_name /
+                   all_args.experiment_name / str(all_args.seed))
         if not run_dir.exists():
             os.makedirs(str(run_dir))
+
+        if all_args.use_wandb:
+            run = wandb.init(
+                config=all_args,
+                project=all_args.wandb_project
+                if all_args.wandb_project else all_args.env_name,
+                group=all_args.wandb_group
+                if all_args.wandb_group else all_args.experiment_name,
+                entity=all_args.user_name,
+                notes=socket.gethostname(),
+                name=all_args.wandb_name if all_args.wandb_name else
+                str(all_args.experiment_name) + "_seed" + str(all_args.seed),
+                dir=str(run_dir),
+                job_type="training",
+                reinit=True)
+        else:
+            if not run_dir.exists():
+                curr_run = 'run1'
+            else:
+                exst_run_nums = [
+                    int(str(folder.name).split('run')[1])
+                    for folder in run_dir.iterdir()
+                    if str(folder.name).startswith('run')
+                ]
+                if len(exst_run_nums) == 0:
+                    curr_run = 'run1'
+                else:
+                    curr_run = 'run%i' % (max(exst_run_nums) + 1)
+            run_dir = run_dir / curr_run
+            if not run_dir.exists():
+                os.makedirs(str(run_dir))
+    else:
+        run_dir = None
 
     setproctitle.setproctitle(
         str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" +
@@ -197,29 +204,38 @@ def main(args):
     eval_workers = [
         mp.Process(
             target=shared_eval_worker,
-            args=(i, [environment_config], eval_env_ctrls[i], eval_storage,
-                  eval_info_queue),
+            args=(
+                i,
+                [environment_config],
+                eval_env_ctrls[i],
+                eval_storage,
+                eval_info_queue,
+            ),
+            kwargs=dict(render=all_args.render),
         ) for i in range(all_args.n_eval_rollout_threads)
     ]
     for ew in eval_workers:
         ew.start()
 
-    # TODO: eval and render
-    if all_args.use_render:
-        raise NotImplementedError
-    else:
-        eval_envs = None
-
     # run experiments
-    runner = SharedRunner(all_args, run_dir, policy, storage, env_ctrls,
-                          info_queue, eval_storage, eval_env_ctrls,
-                          eval_info_queue, device)
-    if not all_args.use_render:
-        runner.run()
-    else:
+    runner = SharedRunner(all_args,
+                          policy,
+                          storage,
+                          env_ctrls,
+                          info_queue,
+                          eval_storage,
+                          eval_env_ctrls,
+                          eval_info_queue,
+                          device,
+                          run_dir=run_dir)
+
+    if all_args.eval:
         assert all_args.model_dir is not None
-        assert all_args.n_render_rollout_threads == 1
-        runner.eval(0, render=True)
+        if all_args.render:
+            assert all_args.n_eval_rollout_threads == 1
+        runner.eval(0)
+    else:
+        runner.run()
 
     # post process
     for ctrl in itertools.chain(env_ctrls, eval_env_ctrls):
@@ -227,13 +243,14 @@ def main(args):
     for worker in itertools.chain(env_workers, eval_workers):
         worker.join()
 
-    if all_args.use_wandb:
-        run.finish()
-    else:
-        if hasattr(runner, writer):
-            runner.writer.export_scalars_to_json(
-                str(runner.log_dir + '/summary.json'))
-            runner.writer.close()
+    if not all_args.eval:
+        if all_args.use_wandb:
+            run.finish()
+        else:
+            if hasattr(runner, "writer"):
+                runner.writer.export_scalars_to_json(
+                    str(runner.log_dir + '/summary.json'))
+                runner.writer.close()
 
 
 if __name__ == "__main__":

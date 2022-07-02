@@ -26,9 +26,17 @@ logger.addHandler(fh)
 
 class SharedRunner:
 
-    def __init__(self, all_args, run_dir, policy, storage, env_ctrls,
-                 info_queue, eval_storage, eval_env_ctrls, eval_info_queue,
-                 device):
+    def __init__(self,
+                 all_args,
+                 policy,
+                 storage,
+                 env_ctrls,
+                 info_queue,
+                 eval_storage,
+                 eval_env_ctrls,
+                 eval_info_queue,
+                 device,
+                 run_dir=None):
 
         self.all_args = all_args
         self.device = device
@@ -41,23 +49,16 @@ class SharedRunner:
         self.episode_length = self.all_args.episode_length
         self.n_rollout_threads = self.all_args.n_rollout_threads
         self.n_eval_rollout_threads = self.all_args.n_eval_rollout_threads
-        self.use_render = self.all_args.use_render
         # interval
         self.save_interval = self.all_args.save_interval
-        self.use_eval = self.all_args.use_eval
         self.eval_interval = self.all_args.eval_interval
         self.log_interval = self.all_args.log_interval
 
         # dir
         self.model_dir = self.all_args.model_dir
 
-        if self.use_render:
-            import imageio
-            self.run_dir = run_dir
-            self.gif_dir = str(self.run_dir / 'gifs')
-            if not os.path.exists(self.gif_dir):
-                os.makedirs(self.gif_dir)
-        else:
+        # TODO: wandb mode
+        if not all_args.eval:
             if self.all_args.use_wandb:
                 self.save_dir = str(wandb.run.dir)
                 self.run_dir = str(wandb.run.dir)
@@ -155,7 +156,16 @@ class SharedRunner:
             with timing.add_time("train"):
                 train_infos = self.train()
 
+            self.storage[0] = self.storage[-1]
+            # storage.step must be changed via inplace operations
+            assert self.storage.step == self.episode_length
+            self.storage.step %= self.episode_length
+
+            for ctrl in self.env_ctrls:
+                ctrl.obs_ready.release()
+
             logger.debug(timing)
+
             # post process
             total_num_steps = (
                 episode + 1) * self.episode_length * self.n_rollout_threads
@@ -166,7 +176,6 @@ class SharedRunner:
             # log information
             if episode % self.log_interval == 0 or episode == episodes - 1:
                 end = time.time()
-                # TODO: use logger
                 logger.info(
                     "Updates {}/{} episodes, total num timesteps {}/{}, FPS {}."
                     .format(episode, episodes, total_num_steps,
@@ -181,9 +190,7 @@ class SharedRunner:
 
                 self.log_info(train_infos, total_num_steps)
 
-            # eval
-            if (episode % self.eval_interval == 0
-                    or episode == episodes - 1) and self.use_eval:
+            if episode % self.eval_interval == 0 or episode == episodes - 1:
                 self.eval(total_num_steps)
 
     @torch.no_grad()
@@ -212,12 +219,6 @@ class SharedRunner:
                 train_infos[k] += v
         self.policy.inc_version()
 
-        self.storage[0] = self.storage[-1]
-        assert self.storage.step == self.episode_length
-        self.storage.step %= self.episode_length
-        for ctrl in self.env_ctrls:
-            ctrl.obs_ready.release()
-
         return {
             k: float(v / self.all_args.sample_reuse)
             for k, v in train_infos.items()
@@ -227,6 +228,9 @@ class SharedRunner:
         for ctrl in self.eval_env_ctrls:
             ctrl.eval_finish.clear()
             ctrl.eval_start.set()
+            assert not ctrl.act_ready.acquire(block=False)
+            while ctrl.obs_ready.acquire(block=False):
+                continue
 
         self.trainer.prep_rollout()
         if self.storage.policy_state is not None:
@@ -255,8 +259,8 @@ class SharedRunner:
                 request, lambda x: x.flatten(end_dim=1).to(self.device))
             rollout_result = recursive_apply(
                 self.policy.rollout(request, deterministic=True),
-                lambda x: x.view(self.n_eval_rollout_threads, self.num_agents, *x.
-                                 shape[1:]).cpu())
+                lambda x: x.view(self.n_eval_rollout_threads, self.num_agents,
+                                 *x.shape[1:]).cpu())
 
             self.eval_storage.actions[:] = rollout_result.action.float()
             policy_state = rollout_result.policy_state
@@ -279,6 +283,7 @@ class SharedRunner:
     def restore(self):
         checkpoint = torch.load(os.path.join(str(self.model_dir), "model.pt"))
         self.policy.load_checkpoint(checkpoint)
+        logger.info(f"Loaded checkpoint from {self.model_dir}.")
 
     def log_info(self, infos, step):
         logger.info('-' * 40)
@@ -287,8 +292,9 @@ class SharedRunner:
             logger.info("{}: \t{:.2f}".format(key, float(v)))
         logger.info('-' * 40)
 
-        if self.all_args.use_wandb:
-            wandb.log(infos, step=step)
-        else:
-            for k, v in infos.items():
-                self.writer.add_scalars(k, {k: v}, step)
+        if not self.all_args.eval:
+            if self.all_args.use_wandb:
+                wandb.log(infos, step=step)
+            else:
+                for k, v in infos.items():
+                    self.writer.add_scalars(k, {k: v}, step)
