@@ -3,6 +3,7 @@ import dataclasses
 import gym
 import multiprocessing as mp
 import numpy as np
+import random
 import time
 import torch
 import queue
@@ -57,9 +58,9 @@ def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
     envs = []
     for i, cfg in enumerate(environment_configs):
         if cfg['args'].get('base'):
-            cfg['args']['base']['seed'] = offset + i
+            cfg['args']['base']['seed'] = random.randint(0, int(1e6))
         else:
-            cfg['args']['base'] = dict(seed=offset + i)
+            cfg['args']['base'] = dict(seed=random.randint(0, int(1e6)))
         env = TorchTensorWrapper(env_base.make(cfg, split='train'))
         envs.append(env)
 
@@ -117,9 +118,9 @@ def shared_eval_worker(rank,
     envs = []
     for i, cfg in enumerate(environment_configs):
         if cfg['args'].get('base'):
-            cfg['args']['base']['seed'] = 100000 + offset + i
+            cfg['args']['base']['seed'] = random.randint(0, int(1e6))
         else:
-            cfg['args']['base'] = dict(seed=100000 + offset + i)
+            cfg['args']['base'] = dict(seed=random.randint(0, int(1e6)))
         env = TorchTensorWrapper(
             env_base.make(cfg, split=('eval' if not render else "render")))
         envs.append(env)
