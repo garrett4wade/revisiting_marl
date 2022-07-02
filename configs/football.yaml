@@ -1,5 +1,6 @@
 base:
-  n_rollout_threads: 50
+  num_train_envs: 50
+  n_rollout_threads: 25
   episode_length: 200
   num_env_steps: 10.0e+7
   ppo_epoch: 10
@@ -7,7 +8,8 @@ base:
   use_eval: True
   eval_episodes: 32
   eval_interval: 50
-  n_eval_rollout_threads: 32
+  num_eval_envs: 32
+  n_eval_rollout_threads: 8
   use_wandb: False
   wandb_project: fast_mappo_football
   wandb_group: check

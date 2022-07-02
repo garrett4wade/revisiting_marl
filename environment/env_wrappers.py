@@ -34,6 +34,7 @@ class TorchTensorWrapper(gym.Wrapper):
         return recursive_apply(self.env.reset(), self._to_tensor)
 
 
+# TODO: rename as env_worker.py
 @dataclasses.dataclass
 class EnvironmentControl:
     act_ready: mp.Semaphore

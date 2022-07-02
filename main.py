@@ -44,6 +44,12 @@ def main(args):
             logger.warning(f"CLI argument {k} conflicts with yaml config. "
                            f"The latter will be overwritten "
                            f"by CLI arguments {k}={getattr(all_args, k)}.")
+    if all_args.n_rollout_threads is None:
+        all_args.n_rollout_threads = all_args.num_train_envs
+    if all_args.n_eval_rollout_threads is None:
+        all_args.n_eval_rollout_threads = all_args.num_eval_envs
+    assert all_args.num_train_envs % all_args.n_rollout_threads == 0
+    assert all_args.num_eval_envs % all_args.n_eval_rollout_threads == 0
 
     policy_config = config['policy']
     environment_config = config['environment']
@@ -154,8 +160,8 @@ def main(args):
     storage = recursive_apply(
         storage,
         lambda x: x.repeat(all_args.episode_length + 1, all_args.
-                           n_rollout_threads, num_agents,
-                           *((1, ) * len(x.shape))).share_memory_(),
+                           num_train_envs, num_agents, *(
+                               (1, ) * len(x.shape))).share_memory_(),
     )
     storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
 
@@ -173,7 +179,7 @@ def main(args):
         eval_storage.policy_state = policy.policy_state_space.sample()
     eval_storage = recursive_apply(
         eval_storage,
-        lambda x: x.repeat(all_args.n_eval_rollout_threads, num_agents,
+        lambda x: x.repeat(all_args.num_eval_envs, num_agents,
                            *((1, ) * len(x.shape))).share_memory_(),
     )
 
@@ -191,22 +197,24 @@ def main(args):
     eval_info_queue = mp.Queue(all_args.n_eval_rollout_threads)
 
     # start worker
-    # TODO: config env number
+    envs_per_worker = all_args.num_train_envs // all_args.n_rollout_threads
     env_workers = [
         mp.Process(
             target=shared_env_worker,
-            args=(i, [environment_config], env_ctrls[i], storage, info_queue),
+            args=(i, [environment_config for _ in range(envs_per_worker)],
+                  env_ctrls[i], storage, info_queue),
         ) for i in range(all_args.n_rollout_threads)
     ]
     for worker in env_workers:
         worker.start()
 
+    envs_per_worker = all_args.num_eval_envs // all_args.n_eval_rollout_threads
     eval_workers = [
         mp.Process(
             target=shared_eval_worker,
             args=(
                 i,
-                [environment_config],
+                [environment_config for _ in range(envs_per_worker)],
                 eval_env_ctrls[i],
                 eval_storage,
                 eval_info_queue,
@@ -232,7 +240,7 @@ def main(args):
     if all_args.eval:
         assert all_args.model_dir is not None
         if all_args.render:
-            assert all_args.n_eval_rollout_threads == 1
+            assert all_args.n_eval_rollout_threads == all_args.num_eval_envs == 1
         runner.eval(0)
     else:
         runner.run()

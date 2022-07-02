@@ -57,18 +57,11 @@ def get_base_config():
                         type=int,
                         default=1,
                         help="Number of torch threads for training")
-    parser.add_argument("--n_rollout_threads",
-                        type=int,
-                        default=180,
-                        help="Number of parallel envs for training rollouts")
-    parser.add_argument("--n_eval_rollout_threads",
-                        type=int,
-                        default=1,
-                        help="Number of parallel envs for evaluating rollouts")
-    parser.add_argument("--n_render_rollout_threads",
-                        type=int,
-                        default=1,
-                        help="Number of parallel envs for rendering rollouts")
+    parser.add_argument("--n_rollout_threads", type=int, default=None)
+    parser.add_argument("--n_eval_rollout_threads", type=int, default=None)
+    parser.add_argument("--num_trian_envs", type=int, default=1)
+    parser.add_argument("--num_eval_envs", type=int, default=1)
+
     parser.add_argument(
         "--num_env_steps",
         type=int,

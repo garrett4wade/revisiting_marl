@@ -47,8 +47,8 @@ class SharedRunner:
         self.experiment_name = self.all_args.experiment_name
         self.num_env_steps = self.all_args.num_env_steps
         self.episode_length = self.all_args.episode_length
-        self.n_rollout_threads = self.all_args.n_rollout_threads
-        self.n_eval_rollout_threads = self.all_args.n_eval_rollout_threads
+        self.num_train_envs = self.all_args.num_train_envs
+        self.num_eval_envs = self.all_args.num_eval_envs
         # interval
         self.save_interval = self.all_args.save_interval
         self.eval_interval = self.all_args.eval_interval
@@ -88,8 +88,8 @@ class SharedRunner:
 
     def run(self):
         start = time.time()
-        episodes = int(self.num_env_steps
-                       ) // self.episode_length // self.n_rollout_threads
+        episodes = int(
+            self.num_env_steps) // self.episode_length // self.num_train_envs
 
         for episode in range(episodes):
             timing = Timing()
@@ -167,8 +167,8 @@ class SharedRunner:
             logger.debug(timing)
 
             # post process
-            total_num_steps = (
-                episode + 1) * self.episode_length * self.n_rollout_threads
+            total_num_steps = (episode +
+                               1) * self.episode_length * self.num_train_envs
             # save model
             if (episode % self.save_interval == 0 or episode == episodes - 1):
                 self.save()
@@ -205,7 +205,7 @@ class SharedRunner:
             request, lambda x: x.flatten(end_dim=1).to(self.device))
         rollout_result = trainer.policy.rollout(request, deterministic=False)
         return recursive_apply(
-            rollout_result, lambda x: x.view(self.n_rollout_threads, self.
+            rollout_result, lambda x: x.view(self.num_train_envs, self.
                                              num_agents, *x.shape[1:]).cpu())
 
     def train(self):
@@ -258,9 +258,8 @@ class SharedRunner:
             request = recursive_apply(
                 request, lambda x: x.flatten(end_dim=1).to(self.device))
             rollout_result = recursive_apply(
-                self.policy.rollout(request, deterministic=True),
-                lambda x: x.view(self.n_eval_rollout_threads, self.num_agents,
-                                 *x.shape[1:]).cpu())
+                self.policy.rollout(request, deterministic=True), lambda x: x.
+                view(self.num_eval_envs, self.num_agents, *x.shape[1:]).cpu())
 
             self.eval_storage.actions[:] = rollout_result.action.float()
             policy_state = rollout_result.policy_state
