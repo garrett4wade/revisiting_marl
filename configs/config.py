@@ -61,6 +61,7 @@ def get_base_config():
     parser.add_argument("--n_eval_rollout_threads", type=int, default=None)
     parser.add_argument("--num_trian_envs", type=int, default=1)
     parser.add_argument("--num_eval_envs", type=int, default=1)
+    parser.add_argument("--num_env_splits", type=int, default=1)
 
     parser.add_argument(
         "--num_env_steps",

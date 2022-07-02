@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from pathlib import Path
+import copy
 import gym
 import itertools
 import logging
@@ -50,6 +51,8 @@ def main(args):
         all_args.n_eval_rollout_threads = all_args.num_eval_envs
     assert all_args.num_train_envs % all_args.n_rollout_threads == 0
     assert all_args.num_eval_envs % all_args.n_eval_rollout_threads == 0
+    assert all_args.n_rollout_threads % all_args.num_env_splits == 0
+    assert all_args.n_eval_rollout_threads % all_args.num_env_splits == 0
 
     policy_config = config['policy']
     environment_config = config['environment']
@@ -159,11 +162,15 @@ def main(args):
 
     storage = recursive_apply(
         storage,
-        lambda x: x.repeat(all_args.episode_length + 1, all_args.
-                           num_train_envs, num_agents, *(
-                               (1, ) * len(x.shape))).share_memory_(),
+        lambda x: x.repeat(all_args.episode_length + 1, all_args.num_train_envs
+                           // all_args.num_env_splits, num_agents,
+                           *((1, ) * len(x.shape))).share_memory_(),
     )
     storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
+
+    storages = [storage] + [
+        copy.deepcopy(storage) for _ in range(all_args.num_env_splits - 1)
+    ]
 
     eval_storage = SampleBatch(
         obs=obs_space.sample(),
@@ -179,59 +186,70 @@ def main(args):
         eval_storage.policy_state = policy.policy_state_space.sample()
     eval_storage = recursive_apply(
         eval_storage,
-        lambda x: x.repeat(all_args.num_eval_envs, num_agents,
-                           *((1, ) * len(x.shape))).share_memory_(),
+        lambda x: x.repeat(all_args.num_eval_envs // all_args.num_env_splits,
+                           num_agents, *(
+                               (1, ) * len(x.shape))).share_memory_(),
     )
+    eval_storages = [eval_storage] + [
+        copy.deepcopy(eval_storage) for _ in range(all_args.num_env_splits - 1)
+    ]
 
     # initialize communication utilities
-    env_ctrls = [
+    env_ctrls = [[
         EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event())
-        for _ in range(all_args.n_rollout_threads)
-    ]
-    eval_env_ctrls = [
+        for _ in range(all_args.n_rollout_threads // all_args.num_env_splits)
+    ] for _ in range(all_args.num_env_splits)]
+    eval_env_ctrls = [[
         EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event(),
                            mp.Event(), mp.Event())
-        for _ in range(all_args.n_eval_rollout_threads)
-    ]
+        for _ in range(all_args.n_eval_rollout_threads //
+                       all_args.num_env_splits)
+    ] for _ in range(all_args.num_env_splits)]
     info_queue = mp.Queue(1000)
     eval_info_queue = mp.Queue(all_args.n_eval_rollout_threads)
 
     # start worker
     envs_per_worker = all_args.num_train_envs // all_args.n_rollout_threads
-    env_workers = [
+    env_workers = [[
         mp.Process(
             target=shared_env_worker,
-            args=(i, [environment_config for _ in range(envs_per_worker)],
-                  env_ctrls[i], storage, info_queue),
-        ) for i in range(all_args.n_rollout_threads)
-    ]
-    for worker in env_workers:
+            args=(
+                i,
+                [environment_config for _ in range(envs_per_worker)],
+                env_ctrls[j][i],
+                storages[j],
+                info_queue,
+            ),
+        ) for i in range(all_args.n_rollout_threads // all_args.num_env_splits)
+    ] for j in range(all_args.num_env_splits)]
+    for worker in itertools.chain.from_iterable(env_workers):
         worker.start()
 
     envs_per_worker = all_args.num_eval_envs // all_args.n_eval_rollout_threads
-    eval_workers = [
+    eval_workers = [[
         mp.Process(
             target=shared_eval_worker,
             args=(
                 i,
                 [environment_config for _ in range(envs_per_worker)],
-                eval_env_ctrls[i],
-                eval_storage,
+                eval_env_ctrls[j][i],
+                eval_storages[j],
                 eval_info_queue,
             ),
             kwargs=dict(render=all_args.render),
-        ) for i in range(all_args.n_eval_rollout_threads)
-    ]
-    for ew in eval_workers:
+        ) for i in range(all_args.n_eval_rollout_threads //
+                         all_args.num_env_splits)
+    ] for j in range(all_args.num_env_splits)]
+    for ew in itertools.chain.from_iterable(eval_workers):
         ew.start()
 
     # run experiments
     runner = SharedRunner(all_args,
                           policy,
-                          storage,
+                          storages,
                           env_ctrls,
                           info_queue,
-                          eval_storage,
+                          eval_storages,
                           eval_env_ctrls,
                           eval_info_queue,
                           device,
@@ -240,15 +258,16 @@ def main(args):
     if all_args.eval:
         assert all_args.model_dir is not None
         if all_args.render:
+            assert all_args.num_env_splits == 1
             assert all_args.n_eval_rollout_threads == all_args.num_eval_envs == 1
         runner.eval(0)
     else:
         runner.run()
 
     # post process
-    for ctrl in itertools.chain(env_ctrls, eval_env_ctrls):
+    for ctrl in itertools.chain(*env_ctrls, *eval_env_ctrls):
         ctrl.exit_.set()
-    for worker in itertools.chain(env_workers, eval_workers):
+    for worker in itertools.chain(*env_workers, *eval_workers):
         worker.join()
 
     if not all_args.eval:

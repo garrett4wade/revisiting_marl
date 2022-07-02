@@ -13,7 +13,7 @@ from algorithm.trainers.mappo import MAPPO
 from algorithm.policy import RolloutRequest, RolloutResult
 from algorithm.trainer import SampleBatch
 from algorithm.modules import gae_trace, masked_normalization
-from utils.namedarray import recursive_apply, array_like
+from utils.namedarray import recursive_apply, array_like, recursive_aggregate
 from utils.timing import Timing
 
 logger = logging.getLogger('shared_runner')
@@ -29,10 +29,10 @@ class SharedRunner:
     def __init__(self,
                  all_args,
                  policy,
-                 storage,
+                 storages,
                  env_ctrls,
                  info_queue,
-                 eval_storage,
+                 eval_storages,
                  eval_env_ctrls,
                  eval_info_queue,
                  device,
@@ -49,6 +49,7 @@ class SharedRunner:
         self.episode_length = self.all_args.episode_length
         self.num_train_envs = self.all_args.num_train_envs
         self.num_eval_envs = self.all_args.num_eval_envs
+        self.num_env_splits = self.all_args.num_env_splits
         # interval
         self.save_interval = self.all_args.save_interval
         self.eval_interval = self.all_args.eval_interval
@@ -72,12 +73,12 @@ class SharedRunner:
                 if not os.path.exists(self.save_dir):
                     os.makedirs(self.save_dir)
 
-        self.storage = storage
+        self.storages = storages
         self.policy = policy
         self.env_ctrls = env_ctrls
         self.info_queue = info_queue
 
-        self.eval_storage = eval_storage
+        self.eval_storages = eval_storages
         self.eval_env_ctrls = eval_env_ctrls
         self.eval_info_queue = eval_info_queue
 
@@ -97,32 +98,73 @@ class SharedRunner:
             train_ep_ret = train_ep_length = train_ep_cnt = 0
 
             for step in range(self.episode_length):
-                # Sample actions
-                with timing.add_time("envstep"):
-                    for ctrl in self.env_ctrls:
+                for s_i in range(self.num_env_splits):
+                    storage = self.storages[s_i]
+
+                    # Sample actions
+                    with timing.add_time("envstep"):
+                        for ctrl in self.env_ctrls[s_i]:
+                            ctrl.obs_ready.acquire()
+
+                    with timing.add_time("inference"):
+                        rollout_result = self.collect(s_i, step)
+
+                    with timing.add_time("storage"):
+                        step = storage.step
+
+                        storage.value_preds[step] = rollout_result.value
+                        storage.actions[step] = rollout_result.action.float()
+                        storage.action_log_probs[
+                            step] = rollout_result.log_prob
+                        if storage.policy_state is not None:
+                            storage.policy_state[
+                                step + 1] = rollout_result.policy_state
+
+                        storage.step += 1
+
+                    for ctrl in self.env_ctrls[s_i]:
+                        ctrl.act_ready.release()
+
+            with timing.add_time("gae"):
+                for s_i in range(self.num_env_splits):
+                    for ctrl in self.env_ctrls[s_i]:
                         ctrl.obs_ready.acquire()
 
-                with timing.add_time("inference"):
-                    rollout_result = self.collect(step)
+                    storage = self.storages[s_i]
 
-                with timing.add_time("storage"):
-                    step = self.storage.step
+                    assert storage.step == self.episode_length
+                    rollout_result = self.collect(s_i, self.episode_length)
+                    storage.value_preds[
+                        self.episode_length] = rollout_result.value
 
-                    self.storage.value_preds[step] = rollout_result.value
-                    self.storage.actions[step] = rollout_result.action.float()
-                    self.storage.action_log_probs[
-                        step] = rollout_result.log_prob
-                    if self.storage.policy_state is not None:
-                        self.storage.policy_state[
-                            step + 1] = rollout_result.policy_state
+                sample = recursive_aggregate(self.storages,
+                                             lambda x: torch.cat(x, dim=1))
+                if self.policy.popart_head is not None:
+                    trace_target_value = self.policy.denormalize_value(
+                        sample.value_preds.to(self.device)).cpu()
+                else:
+                    trace_target_value = sample.value_preds
+                adv = gae_trace(sample.rewards, trace_target_value,
+                                sample.masks, self.all_args.gamma,
+                                self.all_args.gae_lambda, sample.bad_masks)
+                sample.returns = adv + trace_target_value
+                sample.advantages = adv
+                sample.advantages[:-1] = masked_normalization(
+                    adv[:-1], mask=sample.active_masks[:-1])
 
-                    self.storage.step += 1
+            with timing.add_time("train"):
+                train_infos = self.train(sample)
 
-                for ctrl in self.env_ctrls:
-                    ctrl.act_ready.release()
+            for s_i, storage in enumerate(self.storages):
+                storage[0] = storage[-1]
+                # storage.step must be changed via inplace operations
+                assert storage.step == self.episode_length
+                storage.step %= self.episode_length
 
-            for ctrl in self.env_ctrls:
-                ctrl.obs_ready.acquire()
+                for ctrl in self.env_ctrls[s_i]:
+                    ctrl.obs_ready.release()
+
+            logger.debug(timing)
 
             while True:
                 try:
@@ -132,39 +174,6 @@ class SharedRunner:
                     train_ep_cnt += 1
                 except queue.Empty:
                     break
-
-            # compute return and update network
-            with timing.add_time("gae"):
-                assert self.storage.step == self.episode_length
-                rollout_result = self.collect(self.episode_length)
-                self.storage.value_preds[
-                    self.episode_length] = rollout_result.value
-                if self.policy.popart_head is not None:
-                    trace_target_value = self.policy.denormalize_value(
-                        self.storage.value_preds.to(self.device)).cpu()
-                else:
-                    trace_target_value = self.storage.value_preds
-                adv = gae_trace(self.storage.rewards, trace_target_value,
-                                self.storage.masks, self.all_args.gamma,
-                                self.all_args.gae_lambda,
-                                self.storage.bad_masks)
-                self.storage.returns = adv + trace_target_value
-                self.storage.advantages = adv
-                self.storage.advantages[:-1] = masked_normalization(
-                    adv[:-1], mask=self.storage.active_masks[:-1])
-
-            with timing.add_time("train"):
-                train_infos = self.train()
-
-            self.storage[0] = self.storage[-1]
-            # storage.step must be changed via inplace operations
-            assert self.storage.step == self.episode_length
-            self.storage.step %= self.episode_length
-
-            for ctrl in self.env_ctrls:
-                ctrl.obs_ready.release()
-
-            logger.debug(timing)
 
             # post process
             total_num_steps = (episode +
@@ -194,27 +203,26 @@ class SharedRunner:
                 self.eval(total_num_steps)
 
     @torch.no_grad()
-    def collect(self, step) -> RolloutResult:
-        trainer = self.trainer
-        trainer.prep_rollout()
+    def collect(self, split, step) -> RolloutResult:
+        self.trainer.prep_rollout()
+        storage = self.storages[split]
         request = RolloutRequest(
-            self.storage.obs[step], self.storage.policy_state[step]
-            if self.storage.policy_state is not None else None,
-            self.storage.masks[step])
+            storage.obs[step], storage.policy_state[step]
+            if storage.policy_state is not None else None, storage.masks[step])
         request = recursive_apply(
             request, lambda x: x.flatten(end_dim=1).to(self.device))
-        rollout_result = trainer.policy.rollout(request, deterministic=False)
+        rollout_result = self.policy.rollout(request, deterministic=False)
         return recursive_apply(
-            rollout_result, lambda x: x.view(self.num_train_envs, self.
-                                             num_agents, *x.shape[1:]).cpu())
+            rollout_result,
+            lambda x: x.view(self.num_train_envs // self.num_env_splits, self.
+                             num_agents, *x.shape[1:]).cpu())
 
-    def train(self):
+    def train(self, sample):
         train_infos = defaultdict(lambda: 0)
         self.trainer.prep_training()
         for _ in range(self.all_args.sample_reuse):
             train_info = self.trainer.train(
-                recursive_apply(self.storage[:-1],
-                                lambda x: x.to(self.device)))
+                recursive_apply(sample[:-1], lambda x: x.to(self.device)))
             for k, v in train_info.items():
                 train_infos[k] += v
         self.policy.inc_version()
@@ -225,24 +233,31 @@ class SharedRunner:
         }
 
     def eval(self, step):
-        for ctrl in self.eval_env_ctrls:
-            ctrl.eval_finish.clear()
-            ctrl.eval_start.set()
-            assert not ctrl.act_ready.acquire(block=False)
-            while ctrl.obs_ready.acquire(block=False):
-                continue
+        for s_i in range(self.num_env_splits):
+            for ctrl in self.eval_env_ctrls[s_i]:
+                ctrl.eval_finish.clear()
+                ctrl.eval_start.set()
+                while ctrl.act_ready.acquire(block=False):
+                    continue
+                while ctrl.obs_ready.acquire(block=False):
+                    continue
 
         self.trainer.prep_rollout()
-        if self.storage.policy_state is not None:
-            policy_state = array_like(self.eval_storage.policy_state,
-                                      default_value=0)
+        if self.storages[0].policy_state is not None:
+            policy_states = [
+                array_like(eval_storage.policy_state, default_value=0)
+                for eval_storage in self.eval_storages
+            ]
         else:
-            policy_state = None
+            policy_states = [None for _ in range(self.num_env_splits)]
         eval_ep_cnt = eval_ep_len = eval_ep_ret = 0
+        s_i = 0
 
         while eval_ep_cnt < self.all_args.eval_episodes:
-            for ctrl in self.eval_env_ctrls:
+            for ctrl in self.eval_env_ctrls[s_i]:
                 ctrl.obs_ready.acquire()
+
+            eval_storage = self.eval_storages[s_i]
 
             while True:
                 try:
@@ -250,26 +265,32 @@ class SharedRunner:
                     eval_ep_ret += info['episode']['r']
                     eval_ep_len += info['episode']['l']
                     eval_ep_cnt += 1
+                    if eval_ep_cnt >= self.all_args.eval_episodes:
+                        break
                 except queue.Empty:
                     break
 
-            request = RolloutRequest(self.eval_storage.obs, policy_state,
-                                     self.eval_storage.masks)
+            request = RolloutRequest(eval_storage.obs, policy_states[s_i],
+                                     eval_storage.masks)
             request = recursive_apply(
                 request, lambda x: x.flatten(end_dim=1).to(self.device))
             rollout_result = recursive_apply(
-                self.policy.rollout(request, deterministic=True), lambda x: x.
-                view(self.num_eval_envs, self.num_agents, *x.shape[1:]).cpu())
+                self.policy.rollout(request, deterministic=True),
+                lambda x: x.view(self.num_eval_envs // self.num_env_splits, self
+                                 .num_agents, *x.shape[1:]).cpu())
 
-            self.eval_storage.actions[:] = rollout_result.action.float()
-            policy_state = rollout_result.policy_state
+            eval_storage.actions[:] = rollout_result.action.float()
+            policy_states[s_i] = rollout_result.policy_state
 
-            for ctrl in self.eval_env_ctrls:
+            for ctrl in self.eval_env_ctrls[s_i]:
                 ctrl.act_ready.release()
 
-        for ctrl in self.eval_env_ctrls:
-            ctrl.eval_start.clear()
-            ctrl.eval_finish.set()
+            s_i = (s_i + 1) % self.num_env_splits
+
+        for s_i in range(self.num_env_splits):
+            for ctrl in self.eval_env_ctrls[s_i]:
+                ctrl.eval_start.clear()
+                ctrl.eval_finish.set()
 
         eval_info = dict(eval_episode_return=eval_ep_ret / eval_ep_cnt,
                          eval_episode_length=eval_ep_len / eval_ep_cnt)
