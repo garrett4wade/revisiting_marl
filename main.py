@@ -144,55 +144,56 @@ def main(args):
     else:
         raise NotImplementedError()
 
-    # initialze storage
-    storage = SampleBatch(
-        # NOTE: sampled available actions should be 1
-        obs=obs_space.sample(),
-        value_preds=torch.zeros(1),
-        actions=torch.zeros(act_dim),
-        action_log_probs=torch.zeros(1),
-        rewards=torch.zeros(1),
-        masks=torch.ones(1),
-        active_masks=torch.ones(1),
-        bad_masks=torch.ones(1),
-    )
+    storages = []
+    for _ in range(all_args.num_env_splits):
+        # initialze storage
+        storage = SampleBatch(
+            # NOTE: sampled available actions should be 1
+            obs=obs_space.sample(),
+            value_preds=torch.zeros(1),
+            actions=torch.zeros(act_dim),
+            action_log_probs=torch.zeros(1),
+            rewards=torch.zeros(1),
+            masks=torch.ones(1),
+            active_masks=torch.ones(1),
+            bad_masks=torch.ones(1),
+        )
 
-    if policy.num_rnn_layers > 0:
-        storage.policy_state = policy.policy_state_space.sample()
+        if policy.num_rnn_layers > 0:
+            storage.policy_state = policy.policy_state_space.sample()
 
-    storage = recursive_apply(
-        storage,
-        lambda x: x.repeat(all_args.episode_length + 1, all_args.num_train_envs
-                           // all_args.num_env_splits, num_agents,
-                           *((1, ) * len(x.shape))).share_memory_(),
-    )
-    storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
+        storage = recursive_apply(
+            storage,
+            lambda x: x.repeat(
+                all_args.episode_length + 1, all_args.num_train_envs //
+                all_args.num_env_splits, num_agents, *(
+                    (1, ) * len(x.shape))).share_memory_(),
+        )
+        storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
 
-    storages = [storage] + [
-        copy.deepcopy(storage) for _ in range(all_args.num_env_splits - 1)
-    ]
+        storages.append(storage)
 
-    eval_storage = SampleBatch(
-        obs=obs_space.sample(),
-        masks=torch.ones(1),
-        actions=torch.zeros(act_dim),
-        value_preds=None,
-        action_log_probs=None,
-        rewards=None,
-        active_masks=None,
-        bad_masks=None,
-    )
-    if policy.num_rnn_layers > 0:
-        eval_storage.policy_state = policy.policy_state_space.sample()
-    eval_storage = recursive_apply(
-        eval_storage,
-        lambda x: x.repeat(all_args.num_eval_envs // all_args.num_env_splits,
-                           num_agents, *(
-                               (1, ) * len(x.shape))).share_memory_(),
-    )
-    eval_storages = [eval_storage] + [
-        copy.deepcopy(eval_storage) for _ in range(all_args.num_env_splits - 1)
-    ]
+    eval_storages = []
+    for _ in range(all_args.num_env_splits):
+        eval_storage = SampleBatch(
+            obs=obs_space.sample(),
+            masks=torch.ones(1),
+            actions=torch.zeros(act_dim),
+            value_preds=None,
+            action_log_probs=None,
+            rewards=None,
+            active_masks=None,
+            bad_masks=None,
+        )
+        if policy.num_rnn_layers > 0:
+            eval_storage.policy_state = policy.policy_state_space.sample()
+        eval_storage = recursive_apply(
+            eval_storage,
+            lambda x: x.repeat(
+                all_args.num_eval_envs // all_args.num_env_splits, num_agents,
+                *((1, ) * len(x.shape))).share_memory_(),
+        )
+        eval_storages.append(eval_storage)
 
     # initialize communication utilities
     env_ctrls = [[

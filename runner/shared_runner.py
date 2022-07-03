@@ -100,18 +100,18 @@ class SharedRunner:
             for step in range(self.episode_length):
                 for s_i in range(self.num_env_splits):
                     storage = self.storages[s_i]
+                    assert step == storage.step
 
                     # Sample actions
                     with timing.add_time("envstep"):
                         for ctrl in self.env_ctrls[s_i]:
                             ctrl.obs_ready.acquire()
+                            assert not ctrl.obs_ready.acquire(block=False)
 
                     with timing.add_time("inference"):
                         rollout_result = self.collect(s_i, step)
 
                     with timing.add_time("storage"):
-                        step = storage.step
-
                         storage.value_preds[step] = rollout_result.value
                         storage.actions[step] = rollout_result.action.float()
                         storage.action_log_probs[
@@ -123,6 +123,7 @@ class SharedRunner:
                         storage.step += 1
 
                     for ctrl in self.env_ctrls[s_i]:
+                        assert not ctrl.act_ready.acquire(block=False)
                         ctrl.act_ready.release()
 
             with timing.add_time("gae"):
