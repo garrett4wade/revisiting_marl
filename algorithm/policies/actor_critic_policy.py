@@ -267,8 +267,11 @@ class ActorCriticPolicy:
         return self.popart_head.update(x)
 
     def analyze(self, sample: SampleBatch, target="ppo", **kwargs):
-        actor_hx = sample.policy_state.actor_hx[0].transpose(0, 1)
-        critic_hx = sample.policy_state.critic_hx[0].transpose(0, 1)
+        if sample.policy_state is not None:
+            actor_hx = sample.policy_state.actor_hx[0].transpose(0, 1)
+            critic_hx = sample.policy_state.critic_hx[0].transpose(0, 1)
+        else:
+            actor_hx = critic_hx = None
         obs = sample.obs.obs
         if hasattr(sample.obs, "state"):
             state = sample.obs.state
@@ -321,9 +324,11 @@ class ActorCriticPolicy:
             state = requests.obs.state
         else:
             state = obs
-        # TODO: totally remove policy state for MLP
-        actor_hx = requests.policy_state.actor_hx[0].transpose(0, 1)
-        critic_hx = requests.policy_state.critic_hx[0].transpose(0, 1)
+        if requests.policy_state is not None:
+            actor_hx = requests.policy_state.actor_hx[0].transpose(0, 1)
+            critic_hx = requests.policy_state.critic_hx[0].transpose(0, 1)
+        else:
+            actor_hx = critic_hx = None
 
         actor_output, actor_hx = self.actor(
             obs, actor_hx, requests.mask,
@@ -362,8 +367,12 @@ class ActorCriticPolicy:
             log_probs = action_dist.log_prob(actions).sum(-1, keepdim=True)
 
         # .unsqueeze(-1) adds a trailing dimension 1
-        policy_state = PolicyState(actor_hx.transpose(0, 1),
-                                   critic_hx.transpose(0, 1))
+        if requests.policy_state is not None:
+            policy_state = PolicyState(actor_hx.transpose(0, 1),
+                                       critic_hx.transpose(0, 1))
+        else:
+            policy_state = None
+
         return RolloutResult(action=actions,
                              log_prob=log_probs,
                              value=value,
