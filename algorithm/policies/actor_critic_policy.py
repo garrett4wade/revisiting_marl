@@ -71,11 +71,11 @@ class Actor(nn.Module):
             self.std_type = std_type
             if self.std_type == 'fixed':
                 self.log_std = nn.Parameter(float(init_log_std) *
-                                            torch.ones(num_outputs),
+                                            torch.ones(action_dim),
                                             requires_grad=False)
             elif self.std_type == 'separate_learnable':
                 self.log_std = nn.Parameter(float(init_log_std) *
-                                            torch.ones(num_outputs),
+                                            torch.ones(action_dim),
                                             requires_grad=True)
             elif self.std_type == 'shared_learnable':
                 self.log_std = get_initialized_linear(hidden_dim, action_dim,
@@ -113,7 +113,7 @@ class Actor(nn.Module):
                 action_std = self.log_std.exp() * torch.ones_like(action_mean)
             elif self.std_type == 'shared_learnable':
                 action_std = self.log_std(x).exp()
-            acotr_output = (action_mean, action_std)
+            actor_output = (action_mean, action_std)
         else:
             raise NotImplementedError()
 
