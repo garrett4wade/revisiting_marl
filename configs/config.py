@@ -77,15 +77,6 @@ def get_base_config():
 
     # network parameters
     parser.add_argument("--share_policy", action='store_true')
-    parser.add_argument(
-        "--stacked_frames",
-        type=int,
-        default=1,
-        help="Dimension of hidden layers for actor/critic networks")
-    parser.add_argument("--use_stacked_frames",
-                        action='store_true',
-                        default=False,
-                        help="Whether to use stacked_frames")
 
     # recurrent parameters
     parser.add_argument(
@@ -144,10 +135,6 @@ def get_base_config():
                         type=float,
                         default=10.0,
                         help='max norm of gradients (default: 0.5)')
-    parser.add_argument("--use_gae",
-                        action='store_false',
-                        default=True,
-                        help='use generalized advantage estimation')
     parser.add_argument("--gamma",
                         type=float,
                         default=0.99,
@@ -156,10 +143,6 @@ def get_base_config():
                         type=float,
                         default=0.95,
                         help='gae lambda parameter (default: 0.95)')
-    parser.add_argument("--use_proper_time_limits",
-                        action='store_true',
-                        default=False,
-                        help='compute returns taking into account time limits')
     parser.add_argument(
         "--use_huber_loss",
         action='store_false',
@@ -215,6 +198,8 @@ def get_base_config():
         default=False,
         help="by default, do not save render video. If set, save video.")
     parser.add_argument("--render", action='store_true', default=False)
+    parser.add_argument("--render_mode", type=str, default="human")
+    parser.add_argument("--render_idle_time", type=float, default=0.0)
     parser.add_argument("--eval", action='store_true', default=False)
     parser.add_argument(
         "--ifi",

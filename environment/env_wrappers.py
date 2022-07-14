@@ -12,8 +12,6 @@ from algorithm.trainer import SampleBatch
 from utils.namedarray import recursive_aggregate, recursive_apply
 import environment.env_base as env_base
 
-RENDER_IDLE_TIME = 0.2
-
 
 class TorchTensorWrapper(gym.Wrapper):
 
@@ -102,13 +100,18 @@ def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
 
             env_ctrl.obs_ready.release()
 
+    for env in envs:
+        env.close()
+
 
 def shared_eval_worker(rank,
                        environment_configs,
                        env_ctrl: EnvironmentControl,
                        storage: SampleBatch,
                        info_queue: mp.Queue,
-                       render=False):
+                       render=False,
+                       render_mode='rgb_array',
+                       render_idle_time=0.0):
 
     recursive_apply(storage, _check_shm)
     if render:
@@ -125,6 +128,9 @@ def shared_eval_worker(rank,
             env_base.make(cfg, split=('eval' if not render else "render")))
         envs.append(env)
 
+    # TODO: save gif frames
+    frames = []
+
     while not env_ctrl.exit_.is_set():
 
         if not env_ctrl.eval_start.is_set():
@@ -135,8 +141,8 @@ def shared_eval_worker(rank,
             obs = env.reset()
             storage.obs[offset + i] = obs
             if render:
-                env.render()
-                time.sleep(RENDER_IDLE_TIME)
+                frames.append(env.render(mode=render_mode))
+                time.sleep(render_idle_time)
         env_ctrl.obs_ready.release()
 
         while not env_ctrl.eval_finish.is_set():
@@ -147,8 +153,8 @@ def shared_eval_worker(rank,
                     act = storage.actions[offset + i]
                     obs, reward, done, info = env.step(act)
                     if render:
-                        env.render()
-                        time.sleep(RENDER_IDLE_TIME)
+                        frames.append(env.render(mode=render_mode))
+                        time.sleep(render_idle_time)
 
                     if done.all():
                         obs = env.reset()
@@ -162,3 +168,7 @@ def shared_eval_worker(rank,
                     storage.masks[offset + i] = 1 - done_env
 
                 env_ctrl.obs_ready.release()
+
+    print(frames)
+    for env in envs:
+        env.close()
