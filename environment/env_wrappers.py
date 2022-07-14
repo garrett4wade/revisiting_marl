@@ -1,5 +1,6 @@
 from typing import Optional
 import dataclasses
+import logging
 import gym
 import multiprocessing as mp
 import numpy as np
@@ -12,9 +13,11 @@ from algorithm.trainer import SampleBatch
 from utils.namedarray import recursive_aggregate, recursive_apply
 import environment.env_base as env_base
 
+logger = logging.getLogger('shared_runner')
+logger.setLevel(logging.INFO)
+
 
 class TorchTensorWrapper(gym.Wrapper):
-
     def __init__(self, env, device='cpu'):
         super().__init__(env)
         self._device = device
@@ -104,18 +107,25 @@ def shared_env_worker(rank, environment_configs, env_ctrl: EnvironmentControl,
         env.close()
 
 
-def shared_eval_worker(rank,
-                       environment_configs,
-                       env_ctrl: EnvironmentControl,
-                       storage: SampleBatch,
-                       info_queue: mp.Queue,
-                       render=False,
-                       render_mode='rgb_array',
-                       render_idle_time=0.0):
+def shared_eval_worker(
+    rank,
+    environment_configs,
+    env_ctrl: EnvironmentControl,
+    storage: SampleBatch,
+    info_queue: mp.Queue,
+    render=False,
+    render_mode='rgb_array',
+    render_idle_time=0.0,
+    save_video=False,
+    video_file='output.mp4',
+    video_fps=24,
+):
 
     recursive_apply(storage, _check_shm)
     if render:
         assert len(environment_configs) == 1
+        if save_video:
+            assert render_mode == 'rgb_array'
 
     offset = rank * len(environment_configs)
     envs = []
@@ -128,7 +138,6 @@ def shared_eval_worker(rank,
             env_base.make(cfg, split=('eval' if not render else "render")))
         envs.append(env)
 
-    # TODO: save gif frames
     frames = []
 
     while not env_ctrl.exit_.is_set():
@@ -141,7 +150,7 @@ def shared_eval_worker(rank,
             obs = env.reset()
             storage.obs[offset + i] = obs
             if render:
-                frames.append(env.render(mode=render_mode))
+                frames.append(env.render(mode=render_mode).astype(np.uint8))
                 time.sleep(render_idle_time)
         env_ctrl.obs_ready.release()
 
@@ -153,7 +162,8 @@ def shared_eval_worker(rank,
                     act = storage.actions[offset + i]
                     obs, reward, done, info = env.step(act)
                     if render:
-                        frames.append(env.render(mode=render_mode))
+                        frames.append(
+                            env.render(mode=render_mode).astype(np.uint8))
                         time.sleep(render_idle_time)
 
                     if done.all():
@@ -169,6 +179,42 @@ def shared_eval_worker(rank,
 
                 env_ctrl.obs_ready.release()
 
-    print(frames)
+    if save_video:
+        video_format = video_file.split('.')[-1]
+        import cv2
+
+        if video_format == 'avi' or video_format == 'mp4':
+
+            h, w = frames[0].shape[:-1]
+
+            fourcc = cv2.VideoWriter_fourcc(
+                *("XVID" if video_format == 'avi' else "mp4v"))
+            video = cv2.VideoWriter(video_file,
+                                    fourcc,
+                                    fps=video_fps,
+                                    frameSize=(w, h))
+
+            [video.write(frame) for frame in frames]
+
+            cv2.destroyAllWindows()
+            video.release()
+        elif video_format == 'gif':
+            from PIL import Image
+            frames = [
+                Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                for frame in frames
+            ]
+            frames[0].save(video_file,
+                           save_all=True,
+                           append_images=frames[1:],
+                           optimize=False,
+                           duration=1000 / video_fps,
+                           loop=0)
+        else:
+            raise NotImplementedError(
+                f"Video format {video_format} not implemented.")
+
+        logger.info(f"Video saved at {video_file}.")
+
     for env in envs:
         env.close()

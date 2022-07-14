@@ -313,7 +313,7 @@ class SharedRunner:
             logger.info("{}: \t{:.2f}".format(key, float(v)))
         logger.info('-' * 40)
 
-        if not self.all_args.eval:
+        if not (self.all_args.eval or self.all_args.render):
             if self.all_args.use_wandb:
                 wandb.log(infos, step=step)
             else:

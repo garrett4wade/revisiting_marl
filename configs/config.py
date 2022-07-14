@@ -191,21 +191,19 @@ def get_base_config():
                         default=32,
                         help="number of episodes of a single evaluation.")
 
-    # render parameters
-    parser.add_argument(
-        "--save_gifs",
-        action='store_true',
-        default=False,
-        help="by default, do not save render video. If set, save video.")
+    # eval & render parameters
+    parser.add_argument("--eval", action='store_true', default=False)
+
     parser.add_argument("--render", action='store_true', default=False)
     parser.add_argument("--render_mode", type=str, default="human")
     parser.add_argument("--render_idle_time", type=float, default=0.0)
-    parser.add_argument("--eval", action='store_true', default=False)
     parser.add_argument(
-        "--ifi",
-        type=float,
-        default=0.1,
-        help="the play interval of each rendered image in saved video.")
+        "--save_video",
+        action='store_true',
+        default=False,
+        help="by default, do not save render video. If set, save video.")
+    parser.add_argument("--video_file", type=str, default='./output.mp4')
+    parser.add_argument("--video_fps", type=float, default=24)
 
     return parser
 

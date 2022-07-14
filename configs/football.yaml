@@ -37,7 +37,7 @@ environment:
       rewards: scoring
       write_full_episode_dumps: True
       write_video: True
-      logdir: /mnt/c/Users/fuwth/Documents/icml22_demos/ca_hard/ar'
+      logdir: results/football/render
       other_config_options:
         video_format: avi
         render_resolution_x: 960

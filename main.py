@@ -251,7 +251,14 @@ def main(args):
                 eval_storages[j],
                 eval_info_queue,
             ),
-            kwargs=dict(render=all_args.render),
+            kwargs=dict(
+                render=all_args.render,
+                render_idle_time=all_args.render_idle_time,
+                render_mode=all_args.render_mode,
+                save_video=all_args.save_video,
+                video_file=all_args.video_file,
+                video_fps=all_args.video_fps,
+            ),
         ) for i in range(all_args.n_eval_rollout_threads //
                          all_args.num_env_splits)
     ] for j in range(all_args.num_env_splits)]
