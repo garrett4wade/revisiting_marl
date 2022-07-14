@@ -59,7 +59,7 @@ class SharedRunner:
         self.model_dir = self.all_args.model_dir
 
         # TODO: wandb mode
-        if not all_args.eval:
+        if not (all_args.eval or all_args.render):
             if self.all_args.use_wandb:
                 self.save_dir = str(wandb.run.dir)
                 self.run_dir = str(wandb.run.dir)
@@ -244,7 +244,7 @@ class SharedRunner:
                     continue
 
         self.trainer.prep_rollout()
-        if self.storages[0].policy_state is not None:
+        if self.eval_storages[0].policy_state is not None:
             policy_states = [
                 array_like(eval_storage.policy_state, default_value=0)
                 for eval_storage in self.eval_storages
@@ -313,7 +313,7 @@ class SharedRunner:
             logger.info("{}: \t{:.2f}".format(key, float(v)))
         logger.info('-' * 40)
 
-        if not self.all_args.eval:
+        if not (self.all_args.eval or self.all_args.render):
             if self.all_args.use_wandb:
                 wandb.log(infos, step=step)
             else:

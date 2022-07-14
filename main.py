@@ -45,6 +45,9 @@ def main(args):
             logger.warning(f"CLI argument {k} conflicts with yaml config. "
                            f"The latter will be overwritten "
                            f"by CLI arguments {k}={getattr(all_args, k)}.")
+    if all_args.render:
+        all_args.num_eval_envs = all_args.n_eval_rollout_threads = all_args.num_env_splits = 1
+
     if all_args.n_rollout_threads is None:
         all_args.n_rollout_threads = all_args.num_train_envs
     if all_args.n_eval_rollout_threads is None:
@@ -77,7 +80,7 @@ def main(args):
         device = torch.device("cpu")
         torch.set_num_threads(all_args.n_training_threads)
 
-    if not all_args.eval:
+    if not (all_args.eval or all_args.render):
         run_dir = (Path("results") / all_args.env_name /
                    all_args.experiment_name / str(all_args.seed))
         if not run_dir.exists():
@@ -144,35 +147,67 @@ def main(args):
     else:
         raise NotImplementedError()
 
-    storages = []
-    for _ in range(all_args.num_env_splits):
-        # initialze storage
-        storage = SampleBatch(
-            # NOTE: sampled available actions should be 1
-            obs=obs_space.sample(),
-            value_preds=torch.zeros(1),
-            actions=torch.zeros(act_dim),
-            action_log_probs=torch.zeros(1),
-            rewards=torch.zeros(1),
-            masks=torch.ones(1),
-            active_masks=torch.ones(1),
-            bad_masks=torch.ones(1),
-        )
+    if not (all_args.eval or all_args.render):
+        # initialize storage
+        storages = []
+        for _ in range(all_args.num_env_splits):
+            # initialze storage
+            storage = SampleBatch(
+                # NOTE: sampled available actions should be 1
+                obs=obs_space.sample(),
+                value_preds=torch.zeros(1),
+                actions=torch.zeros(act_dim),
+                action_log_probs=torch.zeros(1),
+                rewards=torch.zeros(1),
+                masks=torch.ones(1),
+                active_masks=torch.ones(1),
+                bad_masks=torch.ones(1),
+            )
 
-        if policy.num_rnn_layers > 0:
-            storage.policy_state = policy.policy_state_space.sample()
+            if policy.num_rnn_layers > 0:
+                storage.policy_state = policy.policy_state_space.sample()
 
-        storage = recursive_apply(
-            storage,
-            lambda x: x.repeat(
-                all_args.episode_length + 1, all_args.num_train_envs //
-                all_args.num_env_splits, num_agents, *(
-                    (1, ) * len(x.shape))).share_memory_(),
-        )
-        storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
+            storage = recursive_apply(
+                storage,
+                lambda x: x.repeat(
+                    all_args.episode_length + 1, all_args.num_train_envs //
+                    all_args.num_env_splits, num_agents, *(
+                        (1, ) * len(x.shape))).share_memory_(),
+            )
+            storage.step = torch.tensor(0, dtype=torch.long).share_memory_()
 
-        storages.append(storage)
+            storages.append(storage)
 
+        # initialize communication utilities
+        env_ctrls = [[
+            EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event())
+            for _ in range(all_args.n_rollout_threads //
+                           all_args.num_env_splits)
+        ] for _ in range(all_args.num_env_splits)]
+        info_queue = mp.Queue(1000)
+
+        # start worker
+        envs_per_worker = all_args.num_train_envs // all_args.n_rollout_threads
+        env_workers = [[
+            mp.Process(
+                target=shared_env_worker,
+                args=(
+                    i,
+                    [environment_config for _ in range(envs_per_worker)],
+                    env_ctrls[j][i],
+                    storages[j],
+                    info_queue,
+                ),
+            ) for i in range(all_args.n_rollout_threads //
+                             all_args.num_env_splits)
+        ] for j in range(all_args.num_env_splits)]
+        for worker in itertools.chain.from_iterable(env_workers):
+            worker.start()
+    else:
+        storages = env_workers = env_ctrls = []
+        info_queue = None
+
+    # initialize eval storage
     eval_storages = []
     for _ in range(all_args.num_env_splits):
         eval_storage = SampleBatch(
@@ -195,37 +230,16 @@ def main(args):
         )
         eval_storages.append(eval_storage)
 
-    # initialize communication utilities
-    env_ctrls = [[
-        EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event())
-        for _ in range(all_args.n_rollout_threads // all_args.num_env_splits)
-    ] for _ in range(all_args.num_env_splits)]
+    # initialize eval communication utilities
     eval_env_ctrls = [[
         EnvironmentControl(mp.Semaphore(0), mp.Semaphore(0), mp.Event(),
                            mp.Event(), mp.Event())
         for _ in range(all_args.n_eval_rollout_threads //
                        all_args.num_env_splits)
     ] for _ in range(all_args.num_env_splits)]
-    info_queue = mp.Queue(1000)
     eval_info_queue = mp.Queue(all_args.n_eval_rollout_threads)
 
-    # start worker
-    envs_per_worker = all_args.num_train_envs // all_args.n_rollout_threads
-    env_workers = [[
-        mp.Process(
-            target=shared_env_worker,
-            args=(
-                i,
-                [environment_config for _ in range(envs_per_worker)],
-                env_ctrls[j][i],
-                storages[j],
-                info_queue,
-            ),
-        ) for i in range(all_args.n_rollout_threads // all_args.num_env_splits)
-    ] for j in range(all_args.num_env_splits)]
-    for worker in itertools.chain.from_iterable(env_workers):
-        worker.start()
-
+    # start eval worker
     envs_per_worker = all_args.num_eval_envs // all_args.n_eval_rollout_threads
     eval_workers = [[
         mp.Process(
@@ -237,7 +251,14 @@ def main(args):
                 eval_storages[j],
                 eval_info_queue,
             ),
-            kwargs=dict(render=all_args.render),
+            kwargs=dict(
+                render=all_args.render,
+                render_idle_time=all_args.render_idle_time,
+                render_mode=all_args.render_mode,
+                save_video=all_args.save_video,
+                video_file=all_args.video_file,
+                video_fps=all_args.video_fps,
+            ),
         ) for i in range(all_args.n_eval_rollout_threads //
                          all_args.num_env_splits)
     ] for j in range(all_args.num_env_splits)]
@@ -245,6 +266,7 @@ def main(args):
         ew.start()
 
     # run experiments
+    # TODO: separate policy runner
     runner = SharedRunner(all_args,
                           policy,
                           storages,
@@ -256,11 +278,8 @@ def main(args):
                           device,
                           run_dir=run_dir)
 
-    if all_args.eval:
+    if all_args.eval or all_args.render:
         assert all_args.model_dir is not None
-        if all_args.render:
-            assert all_args.num_env_splits == 1
-            assert all_args.n_eval_rollout_threads == all_args.num_eval_envs == 1
         runner.eval(0)
     else:
         runner.run()
@@ -271,7 +290,7 @@ def main(args):
     for worker in itertools.chain(*env_workers, *eval_workers):
         worker.join()
 
-    if not all_args.eval:
+    if not (all_args.eval or all_args.render):
         if all_args.use_wandb:
             run.finish()
         else:
