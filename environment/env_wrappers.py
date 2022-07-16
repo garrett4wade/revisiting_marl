@@ -18,6 +18,7 @@ logger.setLevel(logging.INFO)
 
 
 class TorchTensorWrapper(gym.Wrapper):
+
     def __init__(self, env, device='cpu'):
         super().__init__(env)
         self._device = device
@@ -176,6 +177,14 @@ def shared_eval_worker(
                     storage.obs[offset + i] = obs
                     done_env = done.all(0, keepdim=True).float()
                     storage.masks[offset + i] = 1 - done_env
+
+                    done_env = done.all(0, keepdim=True).float()
+                    mask = 1 - done_env
+
+                    active_mask = 1 - done
+                    active_mask = active_mask * (1 - done_env) + done_env
+
+                    storage.active_masks[offset + i] = active_mask
 
                 env_ctrl.obs_ready.release()
 

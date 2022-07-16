@@ -217,7 +217,7 @@ def main(args):
             value_preds=None,
             action_log_probs=None,
             rewards=None,
-            active_masks=None,
+            active_masks=torch.ones(1),
             bad_masks=None,
         )
         if policy.num_rnn_layers > 0:

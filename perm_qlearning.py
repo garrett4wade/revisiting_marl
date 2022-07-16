@@ -434,7 +434,7 @@ def main(n_agents, from_scrath=True, algos=[], eps_greedy=False):
 
     df = pd.DataFrame({
         'step': np.concatenate([steps for _ in range(len(algos))]),
-        'loss': np.concatenate(losses),
+        'error': np.concatenate(losses),
         'seed': np.concatenate([seeds for _ in range(len(algos))]),
         'method': methods
     })
@@ -442,7 +442,7 @@ def main(n_agents, from_scrath=True, algos=[], eps_greedy=False):
     plt.ylim(-0.2, 2.0)
     # plt.xlabel('training step', fontsize=16)
     # plt.ylabel('loss', fontsize=16)
-    ax = sns.lineplot(data=df, x='step', y='loss', hue='method', lw=3)
+    ax = sns.lineplot(data=df, x='step', y='error', hue='method', lw=3)
     plt.gcf().subplots_adjust(bottom=0.15)
 
     if eps_greedy:
@@ -452,4 +452,4 @@ def main(n_agents, from_scrath=True, algos=[], eps_greedy=False):
 
 
 if __name__ == '__main__':
-    main(2, True, ['qplex', 'vdn', 'qmix'], True)
+    main(2, False, ['qplex', 'vdn', 'qmix'], True)

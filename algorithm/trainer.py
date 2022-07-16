@@ -32,7 +32,7 @@ class SampleBatch:
 def feed_forward_generator(sample, num_mini_batch, shared=True):
     # TODO: support separate policy
     assert shared
-    batch_size = np.prod(sample.masks.shape[:3])
+    batch_size = sample.masks.shape[1]
 
     assert batch_size >= num_mini_batch and batch_size % num_mini_batch == 0, (
         "PPO requires the number of processes ({}) "
@@ -47,9 +47,8 @@ def feed_forward_generator(sample, num_mini_batch, shared=True):
         rand[i * mini_batch_size:(i + 1) * mini_batch_size]
         for i in range(num_mini_batch)
     ]
-    sample = recursive_apply(sample, lambda x: x.flatten(end_dim=2))
     for indices in sampler:
-        yield sample[indices]
+        yield sample[:, indices]
 
 
 def recurrent_generator(sample,

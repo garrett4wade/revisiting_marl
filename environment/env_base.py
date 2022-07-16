@@ -70,8 +70,6 @@ def register(name, env_class):
 
 def make(cfg: Dict, split='train') -> Environment:
     env_type_ = cfg['type']
-    if env_type_ == 'football':
-        import environment.football.football_env
     cls = ALL_ENVIRONMENT_CLASSES[env_type_]
     if cfg['args']:
         args = {**cfg['args'].get("base", {}), **cfg['args'].get(split, {})}

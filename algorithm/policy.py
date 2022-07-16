@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import Any, List, Union, Dict
+from typing import Any, List, Union, Dict, Optional
 import copy
 import dataclasses
 import numpy as np
@@ -27,6 +27,7 @@ class RolloutRequest:
     obs: Observation
     policy_state: PolicyState = None
     mask: torch.Tensor = torch.ones(1, dtype=torch.bool)
+    active_mask: Optional[torch.Tensor] = None
 
 
 ALL_POLICY_CLASSES = {}

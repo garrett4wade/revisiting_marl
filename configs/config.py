@@ -208,7 +208,10 @@ def get_base_config():
     return parser
 
 
-ALL_CONFIGS = {"football": "configs/football.yaml"}
+ALL_CONFIGS = {
+    "football": "configs/football.yaml",
+    "bridge": "configs/bridge.yaml"
+}
 
 
 def make_config(type_) -> Dict:

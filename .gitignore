@@ -6,6 +6,7 @@ results
 *.avi
 *.mp4
 *.gif
+*.npy
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -118,5 +118,25 @@ class BasicObservationSpace:
     def __init__(self, shape):
         self._shape = shape
 
+    @property
+    def shape(self):
+        return self._shape
+
     def sample(self):
         return BasicObservation(torch.randn(*self._shape))
+
+
+class DictObservationSpace:
+
+    def __init__(self, shapes: Dict, obs_cls):
+        self._shapes = shapes
+        self._obs_cls = obs_cls
+
+    @property
+    def shape(self):
+        return self._shapes
+
+    def sample(self):
+        return self._obs_cls(
+            **{k: torch.randn(*v)
+               for k, v in self.shape.items()})

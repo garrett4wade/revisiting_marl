@@ -1,1 +1,3 @@
 import algorithm.policies.actor_critic_policy
+import algorithm.policies.ar_policy_base
+import algorithm.policies.bridge_ar

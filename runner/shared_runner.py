@@ -9,7 +9,8 @@ import time
 import torch
 import wandb
 
-from algorithm.trainers.mappo import MAPPO
+# from algorithm.trainers.mappo import MAPPO
+from algorithm.trainers.ar_mappo import AutoRegressiveMAPPO
 from algorithm.policy import RolloutRequest, RolloutResult
 from algorithm.trainer import SampleBatch
 from algorithm.modules import gae_trace, masked_normalization
@@ -85,7 +86,7 @@ class SharedRunner:
         if self.model_dir is not None:
             self.restore()
 
-        self.trainer = MAPPO(self.all_args, self.policy)
+        self.trainer = AutoRegressiveMAPPO(self.all_args, self.policy)
 
     def run(self):
         start = time.time()
@@ -209,14 +210,11 @@ class SharedRunner:
         storage = self.storages[split]
         request = RolloutRequest(
             storage.obs[step], storage.policy_state[step]
-            if storage.policy_state is not None else None, storage.masks[step])
-        request = recursive_apply(
-            request, lambda x: x.flatten(end_dim=1).to(self.device))
+            if storage.policy_state is not None else None, storage.masks[step],
+            storage.active_masks[step])
+        request = recursive_apply(request, lambda x: x.to(self.device))
         rollout_result = self.policy.rollout(request, deterministic=False)
-        return recursive_apply(
-            rollout_result,
-            lambda x: x.view(self.num_train_envs // self.num_env_splits, self.
-                             num_agents, *x.shape[1:]).cpu())
+        return recursive_apply(rollout_result, lambda x: x.cpu())
 
     def train(self, sample):
         train_infos = defaultdict(lambda: 0)
@@ -272,13 +270,12 @@ class SharedRunner:
                     break
 
             request = RolloutRequest(eval_storage.obs, policy_states[s_i],
-                                     eval_storage.masks)
-            request = recursive_apply(
-                request, lambda x: x.flatten(end_dim=1).to(self.device))
+                                     eval_storage.masks,
+                                     eval_storage.active_masks)
+            request = recursive_apply(request, lambda x: x.to(self.device))
             rollout_result = recursive_apply(
-                self.policy.rollout(request, deterministic=True),
-                lambda x: x.view(self.num_eval_envs // self.num_env_splits, self
-                                 .num_agents, *x.shape[1:]).cpu())
+                self.policy.rollout(request, deterministic=False),
+                lambda x: x.cpu())
 
             eval_storage.actions[:] = rollout_result.action.float()
             policy_states[s_i] = rollout_result.policy_state
